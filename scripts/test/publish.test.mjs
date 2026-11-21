@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pinsStale, decidePublish, tagsToApply, choosePhpBase, runVersions } from '../lib/publish.mjs';
+import { pinsStale, decidePublish, tagsToApply, choosePhpBase, runVersions, pushTargetVersion, upstreamCommitOf } from '../lib/publish.mjs';
 
 const digest = (c) => `sha256:${c.repeat(64)}`;
 const versions = () => ({
@@ -133,4 +133,41 @@ test('runVersions: ディスパッチ時点の設定に main の pin（baseImage
   assert.deepEqual(used.platforms, dispatch.platforms);
   // main で追うタグが変わっていれば、実際に使った値（ディスパッチ時点）と比べて古いと判定される。
   assert.equal(pinsStale(used, main, 'php', '8.6'), true);
+});
+
+const commit = (c) => c.repeat(40);
+
+// 事件の筋書き: 待機 run が古い GitCommit の Dockerfile で 8.6.1 を作っている間に official が追いつき、
+// push run が新しい GitCommit で同じ 8.6.1 を先に公開した。版が同じなので move になり、待機 run の古い中身が上書きした。
+test('同じ版で、現行が最新の上流 commit・今回が古い commit なら、上書きしない', () => {
+  const commits = { candidate: commit('a'), current: commit('b'), latest: commit('b') };
+  assert.equal(decidePublish({ current: { php: '8.6.1' }, candidate: { php: '8.6.1' }, mustLand: true, stale: false, commits }), 'skip');
+  assert.equal(decidePublish({ current: { php: '8.6.1' }, candidate: { php: '8.6.1' }, mustLand: false, stale: false, commits }), 'skip');
+});
+
+test('今回が最新の上流 commit なら、同じ版でも上書きする（親イメージの更新を届ける）', () => {
+  const commits = { candidate: commit('b'), current: commit('a'), latest: commit('b') };
+  assert.equal(decidePublish({ current: { php: '8.6.1' }, candidate: { php: '8.6.1' }, mustLand: false, stale: false, commits }), 'move');
+});
+
+test('版が違えば上流 commit は見ない', () => {
+  const commits = { candidate: commit('a'), current: commit('b'), latest: commit('b') };
+  assert.equal(decidePublish({ current: { php: '8.6.0' }, candidate: { php: '8.6.1' }, mustLand: true, stale: false, commits }), 'move');
+});
+
+// 事件の筋書き: 待機 run が 8.6.1 を移動タグに載せた後（official はまだ 8.6.0）、debian の更新で push run が
+// 8.6.0 を組んで keep になり、親イメージの更新が移動タグに届かないまま緑で終わった。
+test('pushTargetVersion: 移動タグが official より新しければ、移動タグの版で組む', () => {
+  assert.equal(pushTargetVersion('8.6.0', '8.6.1'), '8.6.1');
+  assert.equal(pushTargetVersion('8.6.1', '8.6.1'), null);
+  assert.equal(pushTargetVersion('8.6.2', '8.6.1'), null);
+  assert.equal(pushTargetVersion('8.6.0', null), null);
+  assert.throws(() => pushTargetVersion('8.6.0', '8.7.0'), /minor/);
+});
+
+test('upstreamCommitOf: ラベルから上流の commit を読み、無ければ null', () => {
+  const img = (labels) => ({ 'linux/amd64': { config: { Labels: labels } }, 'linux/arm64': { config: { Labels: labels } } });
+  assert.equal(upstreamCommitOf(img({ 'dev.animalife.php-images.upstream-commit': commit('c') })), commit('c'));
+  assert.equal(upstreamCommitOf(img({})), null);
+  assert.equal(upstreamCommitOf(null), null);
 });

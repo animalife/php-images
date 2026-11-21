@@ -1,15 +1,19 @@
 name: ci
 
-# PR の検査。ruleset の必須チェックには末尾の CI Gate だけを登録する想定
+# PR とマージキューの検査。ruleset の必須チェックには末尾の CI Gate だけを登録する想定
 # （leaf を条件で skip しても gate が success / skipped を合格として集計する）。
-# Renovate の automerge はこの結果を待つ。
+# Renovate の automerge はこの結果を待つ。どのジョブも PR の情報（変更ファイルなど）を使わないので、
+# merge_group でも同じ内容で走る。
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
 
 permissions: {}
 
 concurrency:
+  # merge_group の ref はキューのエントリごとの gh-readonly-queue/... なので、エントリ同士は取り消し合わない。
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 

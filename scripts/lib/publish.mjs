@@ -1,4 +1,4 @@
-import { canMoveTag } from './tags.mjs';
+import { canMoveTag, compareVersions, minorOf } from './tags.mjs';
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -19,9 +19,13 @@ export function pinsStale(runVersions, mainVersions, kind, minor) {
   return a !== b;
 }
 
-export function decidePublish({ current, candidate, mustLand, stale }) {
+export function decidePublish({ current, candidate, mustLand, stale, commits = null }) {
   if (stale) {
     if (mustLand) throw new Error('この run がビルドに使った pin は main の先端より古いので、移動タグに載せられない。同じ版を指定して dispatch し直す');
+    return 'skip';
+  }
+  const sameVersions = current !== null && Object.keys(candidate).every((k) => candidate[k] === current[k]);
+  if (sameVersions && commits && commits.candidate !== commits.latest && commits.current === commits.latest) {
     return 'skip';
   }
   const decision = canMoveTag(current, candidate);
@@ -50,4 +54,21 @@ export function choosePhpBase({ built, record, mustLand }) {
 
 export function runVersions(dispatch, main) {
   return { ...dispatch, baseImages: main.baseImages, frankenphp: main.frankenphp };
+}
+
+export function pushTargetVersion(officialVersion, movingVersion) {
+  if (movingVersion === null) return null;
+  if (minorOf(officialVersion) !== minorOf(movingVersion)) {
+    throw new Error(`移動タグの PHP ${movingVersion} が上流の Dockerfile（${officialVersion}）と別の minor`);
+  }
+  return compareVersions(movingVersion, officialVersion) > 0 ? movingVersion : null;
+}
+
+const UPSTREAM_COMMIT_LABEL = 'dev.animalife.php-images.upstream-commit';
+
+export function upstreamCommitOf(image) {
+  if (image === null || typeof image !== 'object') return null;
+  const configs = image.config ? [image] : Object.values(image);
+  const values = [...new Set(configs.map((c) => c?.config?.Labels?.[UPSTREAM_COMMIT_LABEL] ?? null))];
+  return values.length === 1 ? values[0] : null;
 }

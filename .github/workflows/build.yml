@@ -157,6 +157,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read # checkout に必要
+      packages: read # 移動タグの php の版を読むのに必要
     strategy:
       fail-fast: false
       matrix:
@@ -211,11 +212,27 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        if: ${{ needs.wait.outputs.found != 'true' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Follow the moving tag
+        id: target
+        if: ${{ needs.wait.outputs.found != 'true' }}
+        env:
+          DOCKERFILE: upstream/${{ steps.resolve.outputs.directory }}/Dockerfile
+          OFFICIAL_TAG: ${{ matrix.officialTag }}
+          OUT_FILE: ${{ runner.temp }}/moving-release.json
+        run: node scripts/push-target.mjs
+
       - name: Override PHP version
         id: rewrite
         env:
           DOCKERFILE: upstream/${{ steps.resolve.outputs.directory }}/Dockerfile
-          RELEASE_FILE: ${{ needs.wait.outputs.found == 'true' && format('{0}/release/php-release.json', runner.temp) || '' }}
+          RELEASE_FILE: ${{ needs.wait.outputs.found == 'true' && format('{0}/release/php-release.json', runner.temp) || steps.target.outputs.releaseFile }}
         run: node scripts/rewrite-php-dockerfile.mjs
 
       - name: Pin base images
@@ -267,6 +284,8 @@ jobs:
     if: ${{ !cancelled() && needs.php-prepare.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    # main に限るデプロイブランチの制限で、ブランチから dispatch した run が GHCR のタグや digest を書けないようにする。
+    environment: ghcr-publish
     permissions:
       packages: write # push-by-digest に必要
     strategy:
@@ -303,6 +322,11 @@ jobs:
           tar -C "${ctx}/src" -xf "${ctx}/context.tar"
           meta="${ctx}/meta.json"
           mapfile -t pin_args < <(jq -r '.pinArgs[]' "${meta}")
+          # jq が失敗しても mapfile は空の配列で続くので、空なら止める（pin が黙って外れないように）。
+          if [ "${#pin_args[@]}" -eq 0 ]; then
+            echo "::error::親イメージの pin の引数が空"
+            exit 1
+          fi
           docker buildx build "${ctx}/src" \
             "${pin_args[@]}" \
             --platform "${PLATFORM}" \
@@ -312,6 +336,7 @@ jobs:
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             --label "org.opencontainers.image.version=$(jq -r .phpVersion "${meta}")" \
             --label "dev.animalife.php-images.upstream=https://github.com/docker-library/php/tree/$(jq -r .gitCommit "${meta}")/$(jq -r .directory "${meta}")" \
+            --label "dev.animalife.php-images.upstream-commit=$(jq -r .gitCommit "${meta}")" \
             --label "dev.animalife.php-images.php-overridden=$(jq -r .overridden "${meta}")" \
             --output "type=image,name=${PHP_IMAGE},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true" \
             --metadata-file "${RUNNER_TEMP}/metadata.json"
@@ -407,6 +432,8 @@ jobs:
       group: publish-php-${{ matrix.version }}
       cancel-in-progress: false
       queue: max
+    # main に限るデプロイブランチの制限で、ブランチから dispatch した run が GHCR のタグや digest を書けないようにする。
+    environment: ghcr-publish
     permissions:
       contents: read # checkout に必要
       packages: write # index とタグの push、attestation の push に必要
@@ -646,6 +673,10 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t pin_args < <(jq -r '.[]' <<< "${PIN_ARGS}")
+          if [ "${#pin_args[@]}" -eq 0 ]; then
+            echo "::error::親イメージの pin の引数が空"
+            exit 1
+          fi
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           CREATED="$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)"
           export SOURCE_DATE_EPOCH CREATED
@@ -689,6 +720,8 @@ jobs:
     if: ${{ !cancelled() && needs.frankenphp-build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # main に限るデプロイブランチの制限で、ブランチから dispatch した run が GHCR のタグや digest を書けないようにする。
+    environment: ghcr-publish
     permissions:
       packages: write # push-by-digest に必要
     strategy:
@@ -807,6 +840,8 @@ jobs:
       group: publish-frankenphp-${{ matrix.version }}
       cancel-in-progress: false
       queue: max
+    # main に限るデプロイブランチの制限で、ブランチから dispatch した run が GHCR のタグや digest を書けないようにする。
+    environment: ghcr-publish
     permissions:
       contents: read # checkout に必要
       packages: write # index とタグの push、attestation の push に必要
@@ -856,6 +891,7 @@ jobs:
           staging-tag: staging-php${{ matrix.version }}-${{ matrix.os }}
           kind: frankenphp
           os: ${{ matrix.os }}
+          official-tag: ${{ matrix.officialTag }}
           frankenphp-version: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}
           run-kind: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
           run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || 'versions.json' }}

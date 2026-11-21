@@ -14,14 +14,17 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 
 - linux/amd64 と linux/arm64 のマルチアーキ。FrankenPHP は上流の `runner` ターゲットだけをビルドする
 - 各アーキの container-structure-test（`tests/`）と版の一致を検査してからタグを付ける
-- 公開した index には GitHub の artifact attestation（SLSA build provenance）を付ける。確かめるには
+- 公開した index には GitHub の artifact attestation（SLSA build provenance）を付ける。消費側が固定している digest で確かめる
 
   ```sh
-  gh attestation verify oci://ghcr.io/animalife/php-images/frankenphp:php8.6-trixie \
+  gh attestation verify oci://ghcr.io/animalife/php-images/frankenphp@sha256:<index の digest> \
     --repo animalife/php-images \
     --signer-workflow animalife/php-images/.github/workflows/build.yml \
-    --source-ref refs/heads/main
+    --source-ref refs/heads/main \
+    --deny-self-hosted-runners
   ```
+
+  attestation はマルチアーキの index の digest にだけ付く。アーキごとの manifest の digest を渡すと verify は失敗する
 
 - 固定タグも、同じ版のまま作り直すと指す先が変わる。親イメージ（`baseImages`）や上流の Dockerfile の更新、
   ビルドの入力の変更で再ビルドすると、同じ `8.6.0-cli-trixie` / `1.14.0-php8.6.0-trixie` が新しい digest を指す。
@@ -29,8 +32,14 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 - 移動タグは古い版へは戻さない（並走した run の巻き戻しを防ぐため）。意図的に戻すときは手で付け替える。
   公開の判定は次のとおり（`scripts/lib/publish.mjs`）
   - この run がビルドに使った pin（`baseImages` や FrankenPHP の pin。php では php に関わるものだけ）が main の先端より古ければ、
-    push の run はタグを付けずに終える（後続の run が組み直す）。版を指定した待機 run は失敗にする
+    push の run はタグを付けずに終える（後続の run が組み直す）。版を指定した待機 run は失敗にする。
+    後続の run は main への push で起きることを前提にしている。`[skip ci]` などでワークフローが起きない push だと
+    組み直されないので、そのときは版を指定しない workflow_dispatch で全部ビルドし直す
+  - 現行の移動タグと版が同じで、移動タグの方が新しい上流の Dockerfile（docker-library/php の commit）で組まれていれば、
+    上書きしない（タグを付けずに成功）。古い Dockerfile で組んだ run が後から公開して中身を戻さないように
   - 現行の移動タグの方が新しければ、固定タグだけ付ける
+- push の run は、php の移動タグが official-images より新しい版（待機 run が php.net から組んだもの）を指していれば、
+  その版に差し替えて組む。official-images の版のまま組むと移動タグを動かせず、親イメージの更新が届かないため
   - FrankenPHP と PHP の一方が上がり一方が下がる場合は、タグを付けずに run を失敗にする
 - `staging-*` タグは attestation を付ける前の一時置き場で、使わない
 
@@ -57,6 +66,7 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 - FrankenPHP の Dockerfile が取る `install-php-extensions`（mlocati/docker-php-extension-installer の `releases/latest`、checksum の検査なし）
 - FrankenPHP の Dockerfile が取る e-dant/watcher（GitHub の `releases/latest` の tarball、checksum の検査なし）
 - どちらの Dockerfile も行う `apt-get update` / `apt-get install` の Debian パッケージ
+- 上のものはアーキごとのジョブがそれぞれ別の時刻に取るので、1 つの index の中でも amd64 と arm64 で中身が食い違うことがある
 - php のソース（php.net の tarball）は版と `PHP_SHA256` で固定され、`.asc` の署名も検査される。Go のモジュールは上流の `go.sum` で検査される
 
 ### 版を足す
@@ -98,7 +108,8 @@ php.net で 8.6.1 が公開される（リリース情報に載り、tarball と
 - 約 5 時間 45 分のうちに公開されなければ、ビルドせずに run を失敗にする（翌朝に緑を見てビルド済みと誤解しないように）
 - official-images がすでにその版（以降）に追いついていれば、差し替えずにそのままビルドする
 - pin（`baseImages` と `frankenphp`）は dispatch した時点ではなく、公開を確認した時点の main のものを使う。
-  追うタグや os などそれ以外は dispatch した時点の値を使い、移動タグに載せるかの判定もこの「実際に使った値」で行う
+  追うタグや os などそれ以外は dispatch した時点の値を使い、移動タグに載せるかの判定もこの「実際に使った値」で行う。
+  スクリプトとワークフローも dispatch した時点のもので動く（待機中に main で直したものは、その run には効かない）
 - FrankenPHP は必ずこの run がビルドした php の上に組む
 - 作ったイメージは php と FrankenPHP の移動タグに必ず載せる。載せられないとき（ビルド中に main の pin が進んだ、
   版の一方が下がる）は run を失敗にする。同じ版を指定して dispatch し直せば、新しい pin で組み直す
@@ -114,8 +125,14 @@ gh workflow run build.yml -R animalife/php-images
 
 ## 初回の Actions 実行で確かめること
 
+最初のビルドを走らせる前に、environment `ghcr-publish` を作り、デプロイブランチを main に限っておく。
+packages: write を持つジョブ（php-build・php-publish・frankenphp-push・frankenphp-publish）がこの environment を使う。
+作る前に走らせると、GitHub が制限なしの environment を自動で作ってしまい、ブランチから dispatch した run も GHCR に書ける。
+
 手元では確かめられなかったもの。
 
+- environment `ghcr-publish` のデプロイブランチの制限で、main 以外からの run の公開ジョブが止まること
+- マージキュー（merge_group）で ci.yml が走り、`CI Gate` が成功すること
 - ジョブ単位の `concurrency.queue: max`（publish ジョブ）が効き、待機中の公開が取り消されないこと
 - `uses: $/.github/actions/publish-image` で composite action が解決されること
 - GHCR への push・attestation の push（`gh attestation verify` が通る）・パッケージの可視性

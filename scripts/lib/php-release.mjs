@@ -1,4 +1,4 @@
-const STABLE_RE = /^\d+\.\d+\.\d+$/;
+const STABLE_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 export function assertStableVersion(version) {
   if (!STABLE_RE.test(version ?? '')) throw new Error(`版が x.y.z の形ではない: '${version}'`);

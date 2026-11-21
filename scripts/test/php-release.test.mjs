@@ -32,4 +32,7 @@ test('問い合わせ URL は版を指定した JSON', () => {
   assert.equal(releaseUrl('8.6.1'), 'https://www.php.net/releases/index.php?json&version=8.6.1');
   assert.throws(() => releaseUrl('8.6'), /版/);
   assert.throws(() => releaseUrl('8.6.1&x=1'), /版/);
+  assert.throws(() => releaseUrl('8.6.01'), /版/);
+  assert.throws(() => releaseUrl('08.6.1'), /版/);
+  assert.equal(releaseUrl('8.6.10'), 'https://www.php.net/releases/index.php?json&version=8.6.10');
 });

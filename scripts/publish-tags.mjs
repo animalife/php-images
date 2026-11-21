@@ -1,14 +1,15 @@
 import { readFileSync } from 'node:fs';
-import { decidePublish, pinsStale, tagsToApply } from './lib/publish.mjs';
+import { findTag } from './lib/official-images.mjs';
+import { decidePublish, pinsStale, tagsToApply, upstreamCommitOf } from './lib/publish.mjs';
 import { inspectImage } from './lib/registry.mjs';
 import { currentFromImage, frankenphpTags, phpTags } from './lib/tags.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';
 
 const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
 
-function versionsOf(ref, keys) {
+function read(ref, keys) {
   const image = inspectImage(ref, '{{json .Image}}');
-  return image === null ? null : currentFromImage(image, keys);
+  return image === null ? null : { versions: currentFromImage(image, keys), commit: upstreamCommitOf(image) };
 }
 
 main(async () => {
@@ -25,8 +26,9 @@ main(async () => {
   const image = env('IMAGE');
   const digest = env('INDEX_DIGEST');
   if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`INDEX_DIGEST が不正: ${digest}`);
-  const candidate = versionsOf(`${image}@${digest}`, keys);
-  if (candidate === null) throw new Error(`${image}@${digest} が無い`);
+  const built = read(`${image}@${digest}`, keys);
+  if (built === null) throw new Error(`${image}@${digest} が無い`);
+  const candidate = built.versions;
   let tags;
   if (kind === 'php') {
     tags = phpTags({ phpVersion: candidate.php, officialTag: env('OFFICIAL_TAG'), os });
@@ -36,11 +38,15 @@ main(async () => {
     tags = frankenphpTags({ frankenphpVersion: pinned, phpVersion: candidate.php, os });
   }
 
-  const current = versionsOf(`${image}:${tags.moving}`, keys);
+  const now = read(`${image}:${tags.moving}`, keys);
+  const current = now?.versions ?? null;
+  // 同じ版どうしでは、ビルドした時点の上流の Dockerfile（docker-library/php の commit）が新しい方を残す。
+  const latest = findTag(readFileSync(env('LIBRARY_FILE'), 'utf8'), env('OFFICIAL_TAG')).gitCommit;
+  const commits = { candidate: built.commit, current: now?.commit ?? null, latest };
   const stale = pinsStale(readJson(env('RUN_VERSIONS_FILE')), readJson(env('MAIN_VERSIONS_FILE')), kind, minor);
-  const decision = decidePublish({ current, candidate, mustLand: runKind === 'wait', stale });
+  const decision = decidePublish({ current, candidate, mustLand: runKind === 'wait', stale, commits });
   const detail = `現行 ${JSON.stringify(current)}、今回 ${JSON.stringify(candidate)}`;
-  if (decision === 'skip') console.log(`::warning::この run の pin は main の先端より古いのでタグを付けない（後続の run が組み直す）。${detail}`);
+  if (decision === 'skip') console.log(`::warning::タグを付けない（pin が main の先端より古い、または同じ版を新しい上流の Dockerfile で組んだものが移動タグにある）。${detail} ${JSON.stringify(commits)}`);
   if (decision === 'keep') console.log(`::warning::移動タグ ${tags.moving} は現行の方が新しいので動かさない（${detail}）`);
   const refs = tagsToApply(decision, image, tags);
   console.log(JSON.stringify({ decision, refs, candidate, current, stale }));

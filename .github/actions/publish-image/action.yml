@@ -23,9 +23,8 @@ inputs:
   os:
     required: true
   official-tag:
-    description: kind=php のときの追うタグ
-    required: false
-    default: ''
+    description: 追うタグ（versions.json の php.<minor>.officialTag）
+    required: true
   frankenphp-version:
     description: kind=frankenphp のときの pin した版
     required: false
@@ -94,12 +93,16 @@ runs:
         push-to-registry: true
 
     # pin の古さは、この run の versions.json と main の先端のものを比べて決める。
-    - name: Fetch versions.json on main
+    - name: Fetch versions.json on main and library/php
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         git fetch --depth 1 origin main
         git show FETCH_HEAD:versions.json > "${RUNNER_TEMP}/main-versions.json"
+        gh api repos/docker-library/official-images/contents/library/php \
+          -H 'Accept: application/vnd.github.raw+json' > "${RUNNER_TEMP}/library-php-now"
 
     - name: Decide tags
       id: tags
@@ -115,6 +118,7 @@ runs:
         RUN_KIND: ${{ inputs.run-kind }}
         RUN_VERSIONS_FILE: ${{ inputs.run-versions-file }}
         MAIN_VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
+        LIBRARY_FILE: ${{ runner.temp }}/library-php-now
       run: node scripts/publish-tags.mjs
 
     - name: Tag
