@@ -1,0 +1,147 @@
+name: ci
+
+# PR の検査。ruleset の必須チェックには末尾の CI Gate だけを登録する想定
+# （leaf を条件で skip しても gate が success / skipped を合格として集計する）。
+# Renovate の automerge はこの結果を待つ。
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-workflows:
+    name: lint workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout に必要
+    env:
+      AQUA_CONFIG: .github/aqua.yaml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
+        with:
+          aqua_version: v2.66.1
+
+      # upstream の actionlint は使わない。build.yml の concurrency.queue と `uses: $/...` を解釈できずに落ちる
+      # （2026-11-21、actionlint 1.7.12 で build.yml を検査して再現）。
+      - name: jactionlint
+        run: jactionlint --profile correctness --format github
+
+      # online audit（impostor-commit など）が GitHub API を引く。
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --persona pedantic --format github .
+
+  test-scripts:
+    name: test scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - run: npm test
+
+      # Renovate の更新 PR がマージ前にここで止まるよう、build.yml の plan と同じ検査をかける。
+      - name: Validate versions.json and the FrankenPHP pin
+        env:
+          EVENT_NAME: workflow_dispatch
+        run: |
+          node scripts/plan.mjs
+          node scripts/verify-frankenphp-pin.mjs
+
+  renovate-config:
+    name: renovate-config-validator
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    container:
+      image: ghcr.io/renovatebot/renovate:44.220.0@sha256:71599a2007228ada2cc6acb5ed836cf2c088537ffe76dafee1ee6a1c5c45d5e5
+      # 既定の非 root ユーザーだと actions/checkout が runner 所有のファイルに書けない。
+      # 経緯は animalife/github-actions の lint-renovate-config.yml を参照。
+      options: --user root
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - run: renovate-config-validator --strict
+
+  verify-actions-lock:
+    name: verify actions.lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout に必要
+    env:
+      # renovate.json5 の constraints.ghActionsLock と揃える（Renovate が lockfile を書く版）。
+      # renovate: datasource=github-releases depName=github/gh-actions-lock
+      GH_ACTIONS_LOCK_VERSION: v0.4.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # タグ pin で中身が固定されるのは immutable release だけなので、入れる前に確かめる。
+      - name: Install gh-actions-lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          immutable="$(gh release view "${GH_ACTIONS_LOCK_VERSION}" -R github/gh-actions-lock --json isImmutable --jq .isImmutable)"
+          if [ "${immutable}" != "true" ]; then
+            echo "::error::gh-actions-lock ${GH_ACTIONS_LOCK_VERSION} は immutable release ではありません"
+            exit 1
+          fi
+          gh extension install github/gh-actions-lock --pin "${GH_ACTIONS_LOCK_VERSION}"
+
+      # lockfile の再生成は `gh actions-lock --no-narrow` で行う（--no-narrow を外すと
+      # SHA pin の uses: がタグ参照に書き換えられ、zizmor の unpinned-uses で落ちる）。
+      - name: Verify actions.lock
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh actions-lock --verify
+
+  gate:
+    name: CI Gate
+    needs: [lint-workflows, test-scripts, renovate-config, verify-actions-lock]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Aggregate results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "Results: ${RESULTS}"
+          if [ -z "${RESULTS// /}" ]; then
+            echo "::error::集計する結果が無い"
+            exit 1
+          fi
+          for r in ${RESULTS}; do
+            case "${r}" in
+              success|skipped) ;;
+              *) echo "::error::必須のジョブが ${r} で終わった"; exit 1 ;;
+            esac
+          done
