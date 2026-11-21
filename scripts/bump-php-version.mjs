@@ -16,7 +16,7 @@ main(async () => {
 
   const open = await rest('GET', `/repos/${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`);
   const openPr = open.length === 0 ? null : prState(await graphql(PR_STATE_QUERY, { owner, name, number: open[0].number }));
-  const action = bumpAction({ needed: next !== null, openPr: openPr && { number: open[0].number, autoMergeRequest: openPr.autoMergeRequest } });
+  const action = bumpAction({ needed: next !== null, openPr: openPr && { number: open[0].number, autoMergeRequest: openPr.autoMergeRequest, isInMergeQueue: openPr.isInMergeQueue } });
 
   async function deleteBranch() {
     if (await rest('GET', `/repos/${repo}/git/ref/heads/${branch}`, undefined, { allow404: true })) {

@@ -42,6 +42,8 @@ php.net での公開からそのままパッチ入りのイメージを作るた
     一致しないか、この run の commit から main の先端までにビルドの入力（build.yml・composite action・scripts・tests・
     `.github/aqua.yaml`・`.node-version`）が変わっていれば、タグを付けずに成功で終える（main の先の commit の run が組み直す）。
     再実行（Re-run）した run なら失敗にする（古いアーカイブで新しい run の中身を上書きしないように）。
+    再実行した run は、pin とビルドの入力が同じでも、run の commit が main の先端でなければ失敗にする（最大 3 日前の
+    アーカイブで、apt のパッケージなどが後退しうるため）。
     php をこの理由でタグなしにした版は、FrankenPHP もその版は組まない（失敗にはしない）。
     後続の run は main への push で起きることを前提にしている。`[skip ci]` などでワークフローが起きない push だと
     組み直されないので、そのときは版を指定しない workflow_dispatch で全部ビルドし直す
@@ -125,8 +127,10 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
    auto-merge を有効にする（チェックが通ればマージキューに入る）。待っている間に main が進んでいても、PR は最新の main から作る
 3. 以降は普段の経路: PR の CI（php.net の情報で差し替えた Dockerfile の smoke build を含む）→ マージ → main の push の run が公開する
 4. この run は PR がマージされるまで見届ける（watch-bump）。2 時間以内にマージされない・PR が閉じられた・conflict になった・
-   チェックが失敗した・auto-merge が外れた（キューから外された）ときは run を失敗にする。App が作った PR の失敗は App にしか
-   通知されないので、dispatch した人に届けるため
+   チェックが失敗した・auto-merge が外れた（マージキューに入っていないのに）ときは run を失敗にする。App が作った PR の失敗は
+   App にしか通知されないので、dispatch した人に届けるため。マージキューに入っている間は待つ。
+   閉じられた・conflict のときでも、main の `versions.json` がすでにその版以上なら（official が追いついて Renovate の patch PR が
+   先にマージされたなど）成功にし、残った PR を閉じて枝を消す
 5. 公式イメージが 8.6.1 を出すと、Renovate が `officialDigest` を埋める PR を作り、push の run が official の Dockerfile で組み直す
 
 - main がすでに 8.6.1 以上なら何もせずに成功する。そのとき 8.6.1 の PR が開いていれば閉じて枝を消す（Renovate に先を越された夜の PR）
@@ -139,12 +143,20 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
 
 ### 失敗したとき
 
-main の run（夜のジョブを含む）でどれかのジョブが失敗・取り消しになると、Issue「build ワークフローが main で失敗している」を作る
-（開いていればコメントを足す）。push か版を指定しない dispatch の run が成功すると、コメントを残して閉じる。
+main の run でどれかのジョブが失敗・取り消しになると Issue を作る（同じタイトルの Issue が開いていればコメントを足す）。
+Issue は push・復旧と夜のジョブで分ける。
+
+- push か版を指定しない dispatch の失敗: 「build ワークフローが main で失敗している」。その後、push か版を指定しない dispatch の
+  run が成功すると、コメントを残して閉じる
+- 夜のジョブの失敗: 「夜のジョブが PHP 8.6.1 を上げられていない」（版ごと）。main の `versions.json` がその版以上になり、
+  push か版を指定しない dispatch の run が成功すると、コメントを残して閉じる（無関係な push の成功では閉じない）。人が閉じてもよい
 
 - 夜のジョブ（版を指定した dispatch）は、同じ版を指定して dispatch し直す。PR を作る前に落ちていても、作った後でも、重ねて走らせて問題ない
   （同じ版の PR があるか main がすでにその版なら何もしない）
-- push の run は Re-run all jobs か、版を指定しない workflow_dispatch で直す。push の差分の基準は「最後に成功した push run」なので、
+- 夜の PR のチェックが一時的に落ちた（php.net の取得失敗など）ときは、dispatch し直しても PR のチェックは走り直さない。
+  PR のチェックを手で再実行するか、PR を閉じてから同じ版で dispatch し直す
+- push の run は、その commit が main の先端なら Re-run all jobs で直せる。main が先へ進んでいれば、再実行は失敗するので、
+  版を指定しない workflow_dispatch を main の先端で走らせる。push の差分の基準は「最後に成功した push run」なので、
   失敗した変更は次の push の run にも含まれる
 - artifact は JSON が 7 日、FrankenPHP の OCI アーカイブが 3 日で消える。それより古い run は再実行できない
 
@@ -168,6 +180,9 @@ packages: write を持つジョブ（php-build・php-publish・frankenphp-push�
 - リポジトリの「Allow auto-merge」と、main の ruleset のマージキュー（PR の auto-merge がキューに入るため）
 - App の権限で、auto-merge の有効化とマージキューへの投入ができるか（Contents / Pull requests の write で足りるか、
   `merge_queues` の権限も要るか）は、初回の夜のジョブで確かめる
+
+org の設定で、Actions（GITHUB_TOKEN）から GHCR に新しいパッケージを作れるかを確かめておく（パッケージの作成を
+メンバーに限る設定などがあると、最初の push が失敗する）。
 
 初回の公開のあと、GHCR のパッケージ（`php-images/php` と `php-images/frankenphp`）は private で作られる。
 パッケージの Package settings → Danger Zone → Change visibility で public にする。消費側のリポジトリから読めることも確かめる。

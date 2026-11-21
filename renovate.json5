@@ -10,6 +10,8 @@
         'github>aquaproj/aqua-renovate-config:file#6ce68f09aca25a88624f468d93fd38e2365e35e0(\\.github/(aqua-ci/)?aqua\\.ya?ml)', // 2.15.0
     ],
     timezone: 'Asia/Tokyo',
+    // ruleset で全ブランチに署名を必須にするので、Renovate のコミットは GitHub に署名させる。
+    platformCommit: 'enabled',
     // 冷却は GitHub Actions など、このリポジトリの CI で書き込み権限付きで動くものに効かせる。
     // versions.json の pin（php の追うタグ・親イメージ・FrankenPHP）は下のルールで外す
     // （このリポジトリのイメージの冷却は消費側で行う）。

@@ -25,8 +25,9 @@ export function client(token) {
 export const PR_STATE_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
-      id state mergeable url
+      id state mergeable url isInMergeQueue
       autoMergeRequest { enabledAt }
+      mergeQueueEntry { state }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
     }
   }
@@ -40,6 +41,7 @@ export function prState(data) {
     state: pr.state,
     mergeable: pr.mergeable,
     autoMergeRequest: pr.autoMergeRequest,
+    isInMergeQueue: pr.isInMergeQueue === true || pr.mergeQueueEntry !== null,
     rollup: pr.commits.nodes[0]?.commit.statusCheckRollup?.state ?? null,
   };
 }

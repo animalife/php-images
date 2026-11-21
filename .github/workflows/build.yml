@@ -119,7 +119,6 @@ jobs:
       - name: Wait
         env:
           PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
-          RELEASE_FILE: ${{ runner.temp }}/php-release.json
           INTERVAL_SECONDS: '180'
           DEADLINE_SECONDS: '20700'
         run: node scripts/wait-php-release.mjs
@@ -187,8 +186,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 130
     permissions:
-      contents: read # checkout に必要
-      pull-requests: read # PR の状態を読むのに必要
+      contents: write # 先を越された夜の PR の枝を消すのに必要（checkout にも使う）
+      pull-requests: write # PR の状態を読む・残った PR を閉じるのに必要
+      checks: read # statusCheckRollup のチェックを読むのに必要
+      statuses: read # statusCheckRollup のステータスを読むのに必要
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -203,6 +204,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ needs.bump.outputs.pr }}
+          PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
           INTERVAL_SECONDS: '60'
           DEADLINE_SECONDS: '7200'
         run: node scripts/watch-bump-pr.mjs
@@ -905,18 +907,32 @@ jobs:
           minor: ${{ matrix.version }}
 
   # 失敗の通知は run を起動した actor にしか届かず、Renovate の自動マージやマージキュー経由の run では人に届く保証が無い。
-  # main の run（dispatch を含む）でどれかのジョブが failure / cancelled になったら Issue に残す。同じ原因で乱立しないよう、
-  # 開いている同名の Issue があればコメントを足すだけにする。push か版を指定しない dispatch の run が成功したら、
-  # 開いている Issue にコメントを残して閉じる（夜のジョブの成功では閉じない。ビルドの失敗が直ったことにはならないため）。
+  # main の run（dispatch を含む）の失敗を Issue に残し、直ったら閉じる。push・復旧と夜のジョブ（版ごと）で Issue を分ける
+  # （scripts/failure-issue.mjs）。
   failure-issue:
     name: Failure issue
     needs: [plan, wait, bump, watch-bump, php-prepare, php-build, php-test, php-publish, frankenphp-plan, frankenphp-build, frankenphp-push, frankenphp-test, frankenphp-publish]
     if: ${{ always() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    # 同時に走ると同じ Issue が二重にできるので直列にする。
+    concurrency:
+      group: ${{ github.workflow }}-failure-issue
+      cancel-in-progress: false
+      queue: max
     permissions:
+      contents: read # checkout に必要
       issues: write # Issue の作成・コメント・クローズに必要
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
       - name: Open, update or close the failure issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -924,21 +940,4 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PHP_VERSION_INPUT: ${{ inputs.php-version }}
           RESULTS: ${{ toJSON(needs) }}
-        run: |
-          set -euo pipefail
-          title="build ワークフローが main で失敗している"
-          list="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${title}\" in:title" --json number,title)"
-          number="$(jq -r --arg t "${title}" 'map(select(.title == $t)) | first | .number // ""' <<< "${list}")"
-          failed="$(jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | "- \(.key): \(.value.result)"' <<< "${RESULTS}")"
-          if [ -n "${failed}" ]; then
-            body="$(printf '%s\n\n- run: %s\n- event: %s%s\n\n%s\n' \
-              "build ワークフローの run が失敗した。README の「失敗したとき」を参照。" \
-              "${RUN_URL}" "${EVENT_NAME}" "${PHP_VERSION_INPUT:+（PHP ${PHP_VERSION_INPUT} を待機）}" "${failed}")"
-            if [ -n "${number}" ]; then
-              gh issue comment "${number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
-            else
-              gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
-            fi
-          elif [ -n "${number}" ] && [ -z "${PHP_VERSION_INPUT}" ]; then
-            gh issue close "${number}" --repo "${GITHUB_REPOSITORY}" --comment "main の run が成功したので閉じる: ${RUN_URL}"
-          fi
+        run: node scripts/failure-issue.mjs

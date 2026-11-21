@@ -54,3 +54,7 @@ test('bumpAction: 同じ版の PR があれば、auto-merge を確かめて見�
 test('bumpAction: PR が無ければ作る', () => {
   assert.deepEqual(bumpAction({ needed: true, openPr: null }), { kind: 'create' });
 });
+
+test('bumpAction: 既存の PR がマージキューに入っていれば auto-merge を投げない', () => {
+  assert.deepEqual(bumpAction({ needed: true, openPr: prState({ autoMergeRequest: null, isInMergeQueue: true }) }), { kind: 'watch', pr: 7, enableAutoMerge: false });
+});

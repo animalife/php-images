@@ -19,8 +19,12 @@ export function pinsStale(runVersions, mainVersions, kind, minor) {
 
 // run は commit 順に直列で走るので、普段は move しかない。main が先へ進んでいれば後続の run が組み直すので、
 // この run はタグに触れない。再実行した run にはその前提が成り立たないので失敗にする。
-export function decidePublish({ stale, runAttempt }) {
+export function decidePublish({ stale, runAttempt, atMainHead = true }) {
   if (!/^[1-9]\d*$/.test(runAttempt ?? '')) throw new Error(`RUN_ATTEMPT が不正: '${runAttempt}'`);
+  // 再実行は最大 3 日前のアーカイブを使う。pin とビルドの入力が同じでも、apt のパッケージなどが後退しうる。
+  if (runAttempt !== '1' && !atMainHead) {
+    throw new Error('再実行した run の commit が main の先端ではないので公開しない。main の先端で版を指定しない workflow_dispatch を走らせる');
+  }
   if (!stale) return 'move';
   if (runAttempt !== '1') {
     throw new Error('再実行した run の pin は main の先端より古いので公開しない。main の先端で版を指定しない workflow_dispatch を走らせる');
@@ -47,11 +51,18 @@ export function planFrankenphp({ publishes, phpVersions, records }) {
   });
 }
 
-// 夜の PR の状態。rollup は statusCheckRollup.state（チェックが無ければ null）。
-export function assessPr({ state, mergeable, autoMergeRequest, rollup }) {
+export function needsMainCheck({ state, mergeable }) {
+  return state === 'CLOSED' || (state === 'OPEN' && mergeable === 'CONFLICTING');
+}
+
+// 夜の PR の状態。rollup は statusCheckRollup.state（チェックが無ければ null）。mainCovers は main の versions.json が
+// すでにその版以上か（閉じられた・conflict のときだけ要る）。
+export function assessPr({ state, mergeable, autoMergeRequest, rollup, isInMergeQueue = false }, { mainCovers = false } = {}) {
   if (state === 'MERGED') return 'merged';
+  if (needsMainCheck({ state, mergeable }) && mainCovers) return 'superseded';
   if (state === 'CLOSED') throw new Error('PR がマージされずに閉じられた');
   if (mergeable === 'CONFLICTING') throw new Error('PR が main と conflict している');
+  if (isInMergeQueue) return 'pending';
   if (rollup === 'FAILURE' || rollup === 'ERROR') throw new Error('PR のチェックが失敗した');
   if (autoMergeRequest === null) throw new Error('PR の auto-merge が外れた（マージキューから外されたなど）');
   return 'pending';

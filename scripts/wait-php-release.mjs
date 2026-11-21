@@ -1,7 +1,6 @@
-import { writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { finishWait, waitForRelease } from './lib/php-release.mjs';
-import { env, main, setOutput } from './lib/gha.mjs';
+import { env, main } from './lib/gha.mjs';
 
 async function fetchJson(url) {
   const res = await fetch(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(30_000) });
@@ -30,7 +29,6 @@ main(async () => {
     },
     log: (m) => console.log(`${new Date().toISOString()} ${m}`),
   });
-  writeFileSync(env('RELEASE_FILE'), JSON.stringify(finishWait(result, version)));
+  finishWait(result, version);
   console.log(`PHP ${version} が公開された`);
-  setOutput('found', 'true');
 });

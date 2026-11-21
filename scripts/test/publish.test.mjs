@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pinsStale, decidePublish, tagsToApply, planFrankenphp, assessPr } from '../lib/publish.mjs';
+import { pinsStale, decidePublish, tagsToApply, planFrankenphp, assessPr, needsMainCheck } from '../lib/publish.mjs';
 
 const digest = (c) => `sha256:${c.repeat(64)}`;
 const versions = () => ({
@@ -122,4 +122,34 @@ test('assessPr: 閉じられた・conflict・チェックの失敗・auto-merge 
   assert.throws(() => assessPr(pr({ rollup: 'FAILURE' })), /チェック/);
   assert.throws(() => assessPr(pr({ rollup: 'ERROR' })), /チェック/);
   assert.throws(() => assessPr(pr({ autoMergeRequest: null })), /auto-merge/);
+});
+
+// auto-merge 経由でマージキューに入ると autoMergeRequest が消えうる（未確定）。どちらでも誤報にならないよう、
+// キューに入っている間は pending にする。
+test('assessPr: マージキューに入っている間は auto-merge が無くても pending', () => {
+  assert.equal(assessPr(pr({ autoMergeRequest: null, isInMergeQueue: true })), 'pending');
+  assert.equal(assessPr(pr({ isInMergeQueue: true })), 'pending');
+});
+
+// official が追いついて Renovate の patch PR が先にマージされると、夜の PR は conflict か閉じられる。main がすでに
+// その版なら目的は果たしているので失敗にしない。
+test('assessPr: conflict・閉じられたでも、main がすでにその版以上なら superseded', () => {
+  assert.equal(assessPr(pr({ mergeable: 'CONFLICTING' }), { mainCovers: true }), 'superseded');
+  assert.equal(assessPr(pr({ state: 'CLOSED' }), { mainCovers: true }), 'superseded');
+  assert.throws(() => assessPr(pr({ mergeable: 'CONFLICTING' }), { mainCovers: false }), /conflict/);
+});
+
+test('assessPr: main がその版以上かを確かめる必要があるのは、閉じられた・conflict のときだけ', () => {
+  assert.equal(needsMainCheck(pr({ state: 'CLOSED' })), true);
+  assert.equal(needsMainCheck(pr({ mergeable: 'CONFLICTING' })), true);
+  assert.equal(needsMainCheck(pr({ state: 'MERGED' })), false);
+  assert.equal(needsMainCheck(pr({})), false);
+});
+
+// 再実行（Re-run failed jobs）は最大 3 日前のアーカイブを使うので、pin とビルドの入力が同じでも、
+// main の先端の commit の run でなければ公開しない（Debian のパッケージが後退しうる）。
+test('decidePublish: 再実行した run は、main の先端の commit でなければ失敗', () => {
+  assert.throws(() => decidePublish({ stale: false, runAttempt: '2', atMainHead: false }), /先端/);
+  assert.equal(decidePublish({ stale: false, runAttempt: '2', atMainHead: true }), 'move');
+  assert.equal(decidePublish({ stale: false, runAttempt: '1', atMainHead: false }), 'move');
 });

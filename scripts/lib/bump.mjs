@@ -28,6 +28,9 @@ export function bumpBranch(version) {
 // 夜のジョブが main と開いている PR を見て、次にすることを決める。
 export function bumpAction({ needed, openPr }) {
   if (!needed) return openPr ? { kind: 'close', pr: openPr.number } : { kind: 'none' };
-  if (openPr) return { kind: 'watch', pr: openPr.number, enableAutoMerge: openPr.autoMergeRequest === null };
+  if (openPr) {
+    // マージキューに入っている PR に auto-merge を投げ直さない（キューに入ると autoMergeRequest が消えうる）。
+    return { kind: 'watch', pr: openPr.number, enableAutoMerge: openPr.autoMergeRequest === null && !openPr.isInMergeQueue };
+  }
   return { kind: 'create' };
 }

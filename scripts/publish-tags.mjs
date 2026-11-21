@@ -35,7 +35,7 @@ main(async () => {
   // 変わっていれば古い。古い run の再実行が、新しい run の公開した中身を古いアーカイブで上書きしないように。
   const changed = readFileSync(env('CHANGED_FILES_FILE'), 'utf8').split('\n').filter(Boolean);
   const stale = pinsStale(runVersions, readJson(env('MAIN_VERSIONS_FILE')), kind, minor) || buildInputsChanged(changed);
-  const decision = decidePublish({ stale, runAttempt: env('RUN_ATTEMPT') });
+  const decision = decidePublish({ stale, runAttempt: env('RUN_ATTEMPT'), atMainHead: env('GITHUB_SHA') === env('MAIN_SHA') });
   if (decision === 'skip') console.log('::warning::この run の pin は main の先端より古いのでタグを付けない（main への push の run が組み直す）');
   const refs = tagsToApply(decision, image, tags);
   console.log(JSON.stringify({ decision, refs, built }));
