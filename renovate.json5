@@ -1,0 +1,175 @@
+{
+    $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+    extends: [
+        'config:recommended',
+        'helpers:pinGitHubActionDigests',
+        // Renovate には aqua manager が無いので、aqua-renovate-config の file preset で
+        // .github/aqua.yaml の packages と registry を追う。preset はタグ付け替え対策で SHA pin し、
+        // 下の customManager が末尾コメントの版を基に新しいタグの SHA へ更新する。
+        // renovate: datasource=github-tags depName=aquaproj/aqua-renovate-config
+        'github>aquaproj/aqua-renovate-config:file#6ce68f09aca25a88624f468d93fd38e2365e35e0(\\.github/aqua\\.ya?ml)', // 2.15.0
+    ],
+    timezone: 'Asia/Tokyo',
+    // 冷却は GitHub Actions など、このリポジトリの CI で書き込み権限付きで動くものに効かせる。
+    // php と FrankenPHP は下のルールで外す（このリポジトリのイメージの冷却は消費側で行う）。
+    minimumReleaseAge: '3 days',
+    platformAutomerge: true,
+    // actions.lock を書き直す gh-actions-lock 拡張の版。ci.yml の GH_ACTIONS_LOCK_VERSION と揃える
+    // （Renovate が CI より新しい版で lockfile を書くと、CI の --verify が未知の lockfile version で落ちる）。
+    constraints: {
+        // renovate: datasource=github-releases depName=github/gh-actions-lock
+        ghActionsLock: 'v0.4.1',
+    },
+    customManagers: [
+        {
+            description: 'versions.json の php.<minor>: 追うタグ（officialTag）の公式イメージの digest。digest の変化 = docker-library 側の更新',
+            customType: 'regex',
+            managerFilePatterns: [
+                '/^versions\\.json$/',
+            ],
+            matchStrings: [
+                '"officialTag": "(?<currentValue>[^"]+)",\\s*"officialDigest": "(?<currentDigest>sha256:[0-9a-f]{64})"',
+            ],
+            depNameTemplate: 'php',
+            datasourceTemplate: 'docker',
+        },
+        {
+            description: 'versions.json の frankenphp: 上流のタグと commit を二重に固定する。新しいタグが出ると版と commit を同時に更新する',
+            customType: 'regex',
+            managerFilePatterns: [
+                '/^versions\\.json$/',
+            ],
+            matchStrings: [
+                '"repository": "(?<depName>[^"]+)",\\s*"version": "(?<currentValue>[^"]+)",\\s*"commit": "(?<currentDigest>[0-9a-f]{40})"',
+            ],
+            datasourceTemplate: 'github-tags',
+        },
+        {
+            description: 'extends の aqua-renovate-config preset を SHA pin のまま追う',
+            customType: 'regex',
+            managerFilePatterns: [
+                '/^renovate\\.json5$/',
+            ],
+            matchStrings: [
+                '// renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\'github>[^#]+#(?<currentDigest>[0-9a-f]{40})[^\']*\',\\s*// (?<currentValue>\\S+)',
+            ],
+        },
+        {
+            description: 'gh-actions-lock 拡張の版を ci.yml の GH_ACTIONS_LOCK_VERSION と constraints.ghActionsLock の 2 か所で追う（同じ depName なので 1 つの PR にまとまる）',
+            customType: 'regex',
+            managerFilePatterns: [
+                '/^\\.github/workflows/ci\\.yml$/',
+                '/^renovate\\.json5$/',
+            ],
+            matchStrings: [
+                '# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+GH_ACTIONS_LOCK_VERSION: (?<currentValue>\\S+)',
+                '// renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+ghActionsLock: \'(?<currentValue>[^\']+)\'',
+            ],
+        },
+    ],
+    packageRules: [
+        {
+            description: 'GitHub Actions は平日の朝にまとめて更新する。minor 以下と digest は自動マージ',
+            matchManagers: [
+                'github-actions',
+            ],
+            schedule: [
+                'before 10am every weekday',
+            ],
+        },
+        {
+            matchManagers: [
+                'github-actions',
+            ],
+            matchUpdateTypes: [
+                'minor',
+                'patch',
+                'digest',
+                'pinDigest',
+            ],
+            automerge: true,
+        },
+        {
+            description: 'php の追うタグは版ごとに固定（8.6-cli-trixie）なので、タグの更新（8.7 など）は提案させず digest だけを追う。系列を足すときは versions.json に手で版を足す',
+            matchManagers: [
+                'custom.regex',
+            ],
+            matchDepNames: [
+                'php',
+            ],
+            matchUpdateTypes: [
+                'major',
+                'minor',
+                'patch',
+            ],
+            enabled: false,
+        },
+        {
+            description: 'php の digest 更新は即時・自動マージ（docker-library の更新を手放しで本番イメージへ届ける経路）。冷却は消費側の digest-cooldown が受け持つ',
+            matchManagers: [
+                'custom.regex',
+            ],
+            matchDepNames: [
+                'php',
+            ],
+            matchUpdateTypes: [
+                'digest',
+            ],
+            minimumReleaseAge: null,
+            schedule: [
+                'at any time',
+            ],
+            automerge: true,
+        },
+        {
+            description: 'FrankenPHP は即時に PR を作る。patch は自動マージ、minor 以上は挙動の変化を含みうるので手動。冷却は消費側が受け持つ',
+            matchDatasources: [
+                'github-tags',
+            ],
+            matchPackageNames: [
+                'php/frankenphp',
+            ],
+            minimumReleaseAge: null,
+            schedule: [
+                'at any time',
+            ],
+        },
+        {
+            matchDatasources: [
+                'github-tags',
+            ],
+            matchPackageNames: [
+                'php/frankenphp',
+            ],
+            matchUpdateTypes: [
+                'patch',
+            ],
+            automerge: true,
+        },
+        {
+            description: 'aqua の版の更新は aqua-checksums.json の作り直し（`AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune`）が要るので、1 つの PR にまとめて手動マージにする',
+            matchFileNames: [
+                '.github/aqua.yaml',
+            ],
+            groupName: 'aqua',
+            automerge: false,
+        },
+        {
+            description: 'actions.lock を生成・検証する gh-actions-lock 拡張は手動マージ（lockfile の検証ツール自体を未レビューで入れ替えない）',
+            matchPackageNames: [
+                'github/gh-actions-lock',
+            ],
+            automerge: false,
+        },
+        {
+            description: 'aqua-renovate-config preset は上の customManager で追うので、renovate-config manager 側の検出を無効にする',
+            matchManagers: [
+                'renovate-config',
+            ],
+            matchDepNames: [
+                'aquaproj/aqua-renovate-config',
+            ],
+            enabled: false,
+        },
+    ],
+}
