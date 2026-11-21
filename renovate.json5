@@ -11,7 +11,8 @@
     ],
     timezone: 'Asia/Tokyo',
     // 冷却は GitHub Actions など、このリポジトリの CI で書き込み権限付きで動くものに効かせる。
-    // php と FrankenPHP は下のルールで外す（このリポジトリのイメージの冷却は消費側で行う）。
+    // versions.json の pin（php の追うタグ・親イメージ・FrankenPHP）は下のルールで外す
+    // （このリポジトリのイメージの冷却は消費側で行う）。
     minimumReleaseAge: '3 days',
     platformAutomerge: true,
     // actions.lock を書き直す gh-actions-lock 拡張の版。ci.yml の GH_ACTIONS_LOCK_VERSION と揃える

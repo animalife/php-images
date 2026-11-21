@@ -20,7 +20,6 @@ main(async () => {
     const target = env('TARGET');
     const def = JSON.parse(readFileSync(env('BAKE_FILE'), 'utf8')).target?.[target];
     if (!def) throw new Error(`bake の定義にターゲット ${target} が無い`);
-    // 上流が PHP の系列ごとに選ぶ php-base と、versions.json の追うタグが食い違ったら止める。
     const expected = env('EXPECTED_PHP_BASE');
     if (def.contexts?.['php-base'] !== expected) {
       throw new Error(`上流の docker-bake.hcl の php-base は ${def.contexts?.['php-base']} で、versions.json から決まる ${expected} と違う`);

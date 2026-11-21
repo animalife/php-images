@@ -393,7 +393,7 @@ jobs:
 
   php-publish:
     name: Publish php ${{ matrix.version }}
-    needs: [plan, php-test]
+    needs: [plan, wait, php-test]
     # どれか 1 つのアーキの検査が落ちたら、その run のタグ付けは全部止める。
     if: ${{ !cancelled() && needs.php-test.result == 'success' }}
     runs-on: ubuntu-24.04
@@ -436,6 +436,30 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 待機 run は公開を確認した時点の pin でビルドする。その後に main の pin（親イメージ・FrankenPHP）が進んでいたら、
+      # 新しい pin で組んだ push の run が先に移動タグを取っているかもしれないので、移動タグは動かさない。
+      - name: Download versions snapshot
+        if: ${{ needs.wait.outputs.found == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: versions-snapshot
+          path: ${{ runner.temp }}/snapshot
+
+      - name: Check pins are still current
+        id: fresh
+        env:
+          SNAPSHOT: ${{ runner.temp }}/snapshot/main-versions.json
+        run: |
+          set -euo pipefail
+          allow=true
+          if [ -f "${SNAPSHOT}" ]; then
+            git fetch --depth 1 origin main
+            git show FETCH_HEAD:versions.json > "${RUNNER_TEMP}/main-now.json"
+            q='{baseImages, frankenphp}'
+            if [ "$(jq -cS "${q}" "${SNAPSHOT}")" != "$(jq -cS "${q}" "${RUNNER_TEMP}/main-now.json")" ]; then allow=false; fi
+          fi
+          echo "allow=${allow}" >> "${GITHUB_OUTPUT}"
+
       - name: Publish
         id: publish
         uses: $/.github/actions/publish-image
@@ -447,6 +471,7 @@ jobs:
           kind: php
           os: ${{ matrix.os }}
           official-tag: ${{ matrix.officialTag }}
+          allow-move: ${{ steps.fresh.outputs.allow }}
 
       # FrankenPHP のビルドが php-base を決めるのに使う。移動タグを動かさなかった（現行の方が新しい）ときは、
       # この run の php ではなく移動タグの php の上に組ませる。
@@ -770,6 +795,30 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 待機 run は公開を確認した時点の pin でビルドする。その後に main の pin（親イメージ・FrankenPHP）が進んでいたら、
+      # 新しい pin で組んだ push の run が先に移動タグを取っているかもしれないので、移動タグは動かさない。
+      - name: Download versions snapshot
+        if: ${{ needs.wait.outputs.found == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: versions-snapshot
+          path: ${{ runner.temp }}/snapshot
+
+      - name: Check pins are still current
+        id: fresh
+        env:
+          SNAPSHOT: ${{ runner.temp }}/snapshot/main-versions.json
+        run: |
+          set -euo pipefail
+          allow=true
+          if [ -f "${SNAPSHOT}" ]; then
+            git fetch --depth 1 origin main
+            git show FETCH_HEAD:versions.json > "${RUNNER_TEMP}/main-now.json"
+            q='{baseImages, frankenphp}'
+            if [ "$(jq -cS "${q}" "${SNAPSHOT}")" != "$(jq -cS "${q}" "${RUNNER_TEMP}/main-now.json")" ]; then allow=false; fi
+          fi
+          echo "allow=${allow}" >> "${GITHUB_OUTPUT}"
+
       - name: Publish
         uses: $/.github/actions/publish-image
         with:
@@ -780,3 +829,4 @@ jobs:
           kind: frankenphp
           os: ${{ matrix.os }}
           frankenphp-version: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}
+          allow-move: ${{ steps.fresh.outputs.allow }}

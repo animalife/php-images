@@ -30,6 +30,10 @@ inputs:
     description: kind=frankenphp のときの pin した版
     required: false
     default: ''
+  allow-move:
+    description: false なら移動タグを動かさない（固定タグだけ付ける）
+    required: false
+    default: 'true'
 
 outputs:
   digest:
@@ -91,6 +95,7 @@ runs:
         FRANKENPHP_VERSION: ${{ inputs.frankenphp-version }}
         IMAGE: ${{ inputs.image }}
         INDEX_DIGEST: ${{ steps.index.outputs.digest }}
+        ALLOW_MOVE: ${{ inputs.allow-move }}
       run: node scripts/publish-tags.mjs
 
     - name: Tag
@@ -112,5 +117,4 @@ runs:
           echo "- digest: \`${INDEX_DIGEST}\`"
           echo "- tags: \`${FIXED}\`$([ "${DECISION}" = "move" ] && echo ", \`${MOVING}\`" || echo "（移動タグ ${MOVING} は動かしていない: ${DECISION}）")"
         } >> "${GITHUB_STEP_SUMMARY}"
-        # 固定タグは付けたうえで、移動タグを決められないときは run を失敗にして人に知らせる。
         if [ "${DECISION}" = "conflict" ]; then exit 1; fi

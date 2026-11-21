@@ -38,11 +38,16 @@ main(async () => {
   }
 
   const current = inspect(`${image}:${tags.moving}`, keys);
-  const decision = canMoveTag(current, candidate);
+  let decision = canMoveTag(current, candidate);
+  const stale = decision === 'move' && env('ALLOW_MOVE', { optional: true }) === 'false';
+  if (stale) {
+    console.log(`::warning::この run がビルドに使った pin は main の先端より古いので、移動タグ ${tags.moving} は動かさない`);
+    decision = 'keep';
+  }
   const detail = `現行 ${JSON.stringify(current)}、今回 ${JSON.stringify(candidate)}`;
   if (decision === 'conflict') {
     console.log(`::error::移動タグ ${tags.moving} の現行と今回で、版の一方が上がり一方が下がる（${detail}）。固定タグだけ付けて失敗にする。新しい方の PHP の版を指定した workflow_dispatch で揃える`);
-  } else if (decision === 'keep') {
+  } else if (decision === 'keep' && !stale) {
     console.log(`::warning::移動タグ ${tags.moving} は現行の方が新しいので動かさない（${detail}）`);
   }
   console.log(JSON.stringify({ ...tags, decision, candidate, current }));

@@ -119,6 +119,8 @@ jobs:
             git -C "${src}" fetch -q --depth 1 https://github.com/docker-library/php.git "${commit}"
             git -C "${src}" checkout -q FETCH_HEAD -- "${directory}/Dockerfile"
             GITHUB_OUTPUT=/dev/null KIND=php DOCKERFILE="${src}/${directory}/Dockerfile" node scripts/pin-base-images.mjs
+            # 待機の経路で差し替える 3 行が上流の現物にあるか（RELEASE_FILE が空なら読むだけ）。
+            GITHUB_OUTPUT=/dev/null DOCKERFILE="${src}/${directory}/Dockerfile" RELEASE_FILE='' node scripts/rewrite-php-dockerfile.mjs
             echo "::endgroup::"
             echo "::group::frankenphp ${minor}"
             target="runner-php-${minor//./-}-${os}"
