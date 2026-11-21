@@ -1,5 +1,3 @@
-// php.net で版が公開されるのを待つ。公開されたら RELEASE_FILE にリリース情報を書く。
-// 入力（環境変数）: PHP_VERSION, RELEASE_FILE, INTERVAL_SECONDS, DEADLINE_SECONDS
 import { writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { waitForRelease } from './lib/php-release.mjs';

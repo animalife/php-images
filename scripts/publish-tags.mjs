@@ -1,12 +1,7 @@
-// 公開するタグと、移動タグを動かしてよいかを決める。移動タグは現行より古い版へは戻さない。
-// 入力（環境変数）:
-//   KIND（php / frankenphp）, OS, OFFICIAL_TAG（php のとき）, FRANKENPHP_VERSION（frankenphp のとき。pin した版）
-//   IMAGE（タグなしのイメージ名）, INDEX_DIGEST（公開する index の digest）
 import { execFileSync } from 'node:child_process';
 import { canMoveTag, currentFromImage, frankenphpTags, phpTags } from './lib/tags.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';
 
-// タグが無ければ null。それ以外の失敗（認証・ネットワーク）は例外のまま落とす。
 function inspect(ref, keys) {
   let out;
   try {

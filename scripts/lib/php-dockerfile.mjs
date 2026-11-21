@@ -1,7 +1,6 @@
 import { assertStableVersion } from './php-release.mjs';
 import { compareVersions, minorOf } from './tags.mjs';
 
-// docker-library/php の Dockerfile のうち、差し替えてよい 3 行。GPG_KEYS と署名検証の RUN は触らない。
 const LINES = {
   PHP_VERSION: /^ENV PHP_VERSION([ =])(\S+)$/,
   PHP_URL: /^ENV PHP_URL="([^"]+)" PHP_ASC_URL="([^"]+)"$/,
@@ -33,7 +32,6 @@ function bumpUrl(url, from, to, key) {
   return url.replace(needle, `/php-${to}.`);
 }
 
-// release は php.net の JSON（parseRelease の戻り値）。
 export function rewritePhpEnv(text, release) {
   assertStableVersion(release.version);
   const current = readPhpEnv(text);

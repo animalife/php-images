@@ -9,7 +9,6 @@ export function releaseUrl(version) {
   return `https://www.php.net/releases/index.php?json&version=${version}`;
 }
 
-// 未公開なら null。
 export function parseRelease(json, version) {
   if (json === null || typeof json !== 'object') throw new Error('php.net の応答が JSON オブジェクトではない');
   if ('error' in json) return null;
@@ -18,8 +17,6 @@ export function parseRelease(json, version) {
   return { version: json.version, source: json.source };
 }
 
-// 公開を待つ。deadline と interval は秒、now は経過秒を返す。assetsReady は tarball と署名が取れるかを確かめる。
-// 戻り値の status: found（release 付き）/ timeout（期限まで未公開）/ error（最後の試行が失敗のまま期限）。
 export async function waitForRelease({
   version, interval, deadline, now, sleep, fetchJson, log, assetsReady = async () => true,
 }) {

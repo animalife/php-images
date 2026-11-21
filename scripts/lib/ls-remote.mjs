@@ -1,4 +1,3 @@
-// git ls-remote の出力から、タグが指す commit を返す（無ければ null）。
 export function tagCommit(output, tag) {
   const refs = new Map(output.split('\n').filter(Boolean).map((line) => {
     const [sha, ref] = line.split('\t');

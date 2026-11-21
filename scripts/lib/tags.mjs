@@ -32,8 +32,6 @@ export function frankenphpTags({ frankenphpVersion, phpVersion, os }) {
   return { fixed: `${fp}-php${phpVersion}-${os}`, moving: `php${minorOf(phpVersion)}-${os}` };
 }
 
-// 移動タグを古い版へ戻さない。move: 動かす / keep: 現行の方が新しいので動かさない /
-// conflict: 片方が上がり片方が下がる（どちらを指すべきか決められない）。現行の値が読めなければ例外。
 export function canMoveTag(current, candidate) {
   if (current === null) return 'move';
   const cmp = Object.keys(candidate).map((key) => compareVersions(candidate[key], current[key]));

@@ -1,5 +1,3 @@
-// docker-library/official-images の library/<name>（RFC 2822 風の stanza 列）を読む。
-// 先頭の stanza はヘッダで、GitRepo などの既定値を持つ。
 
 function parseStanzas(text) {
   const stanzas = [];

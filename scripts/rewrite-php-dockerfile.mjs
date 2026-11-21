@@ -1,5 +1,3 @@
-// 上流の Dockerfile の PHP_VERSION / PHP_URL・PHP_ASC_URL / PHP_SHA256 を php.net の版へ差し替える。
-// 入力（環境変数）: DOCKERFILE, RELEASE_FILE（php.net の JSON。空なら差し替えない）
 import { readFileSync, writeFileSync } from 'node:fs';
 import { readPhpEnv, rewritePhpEnv } from './lib/php-dockerfile.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';

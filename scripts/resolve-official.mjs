@@ -1,5 +1,3 @@
-// official-images の library/php から、追うタグの docker-library/php の commit とディレクトリを引く。
-// 入力（環境変数）: LIBRARY_FILE, OFFICIAL_TAG
 import { readFileSync } from 'node:fs';
 import { findTag } from './lib/official-images.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';

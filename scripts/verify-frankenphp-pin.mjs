@@ -1,6 +1,4 @@
-// versions.json の FrankenPHP のタグが、pin した commit を指しているかを確かめる。
 // Renovate はタグと commit を同時に更新するので、タグの付け替え（同じ版名で別 commit）をここで止める。
-// 入力（環境変数）: VERSIONS_FILE（省略時は versions.json）
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { tagCommit } from './lib/ls-remote.mjs';
