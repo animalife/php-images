@@ -31,30 +31,30 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 - 固定タグも、同じ版のまま作り直すと指す先が変わる。親イメージ（`baseImages`）や上流の Dockerfile の更新、
   ビルドの入力の変更で再ビルドすると、同じ `8.6.0-cli-trixie` / `1.14.0-php8.6.0-trixie` が新しい digest を指す。
   内容を固定したいときは digest で参照する
-- 移動タグは古い版へは戻さない（並走した run の巻き戻しを防ぐため）。意図的に戻すときは手で付け替える。
-  公開の判定は次の順に決まる（`scripts/lib/publish.mjs`）
-  - この run がビルドに使った pin（`baseImages` や FrankenPHP の pin。php では php に関わるものだけ）が main の先端より古ければ、
-    push の run はタグを付けずに成功で終える（後続の run が組み直す）。再実行（Re-run）した push の run は失敗にする。
-    待機 run は同じ版で起動し直す（下の「予告がある夜」）。
+- 公開するのは main の push の run（と、復旧用の版を指定しない workflow_dispatch）だけ。ビルドする PHP の版は常に
+  `versions.json` の pin で、run は commit 順に直列で走る（build.yml の concurrency）。
+  - この run の `versions.json` と main の先端の `versions.json` が、そのイメージに関わる pin（php では `baseImages.php` と
+    その版の設定、FrankenPHP ではそれに `baseImages.frankenphp` と `frankenphp` を足したもの。`officialDigest` は除く）で
+    一致しなければ、タグを付けずに成功で終える（main の先の commit の run が組み直す）。再実行（Re-run）した run なら失敗にする。
     後続の run は main への push で起きることを前提にしている。`[skip ci]` などでワークフローが起きない push だと
     組み直されないので、そのときは版を指定しない workflow_dispatch で全部ビルドし直す
-  - 版が現行の移動タグと同じで、移動タグの方が公開時点の `library/php` の GitCommit（新しい上流の Dockerfile）で組まれ、
-    今回はそうでなければ、上書きしない（タグを付けずに成功）。古い Dockerfile で組んだ run が後から公開して中身を戻さないように
-  - 版がすべて現行以上なら（同じ版を含む）、固定タグと移動タグを付ける
-  - 現行の移動タグの方が新しければ（版がすべて現行以下で、どれかが小さい）、固定タグだけ付ける
-  - FrankenPHP と PHP の一方が上がり一方が下がる場合は、タグを付けずに run を失敗にする
-- push の run は、php の移動タグが official-images より新しい版（待機 run が php.net から組んだもの）を指していれば、
-  その版に差し替えて組む。official-images の版のまま組むと移動タグを動かせず、親イメージの更新が届かないため
+  - それ以外は、固定タグと移動タグを付ける（`scripts/lib/publish.mjs`）
 - `staging-*` タグは attestation を付ける前の一時置き場で、使わない
 
 ## 設定: versions.json
 
 ビルドする版は `versions.json` の 1 ファイルで決まる。
 
-- `php.<minor>`: `officialTag` は「追うタグ」（公式 `php` イメージのタグ）。FrankenPHP は ZTS の PHP を前提にするので、
-  8.6 以上は `<minor>-cli-<os>`、8.5 以下は `<minor>-zts-<os>`（上流の docker-bake.hcl の `php_base_variant` と同じ。
-  食い違うとビルドが止まる）。`officialDigest` はそのタグの公式イメージの digest で、Renovate が更新する。
-  これはビルドのきっかけで、内容は固定しない。ビルドする Dockerfile は、ビルドした時点の `library/php` の `GitCommit` から取る
+- `php.<minor>`: ビルドする PHP の版を、パッチ付きの公式 `php` イメージのタグ（`officialTag`、例 `8.6.0-cli-trixie`）で持つ。
+  FrankenPHP は ZTS の PHP を前提にするので、8.6 以上は `cli`、8.5 以下は `zts`（上流の docker-bake.hcl の
+  `php_base_variant` と同じ。食い違うとビルドが止まる）。`officialDigest` はそのタグの公式イメージの digest。
+  - `officialDigest` はビルドのきっかけで、内容は固定しない。ビルドする Dockerfile はビルドした時点の `library/php` から取る:
+    パッチ付きのタグがあればその `GitCommit` / `Directory`、無ければ（official がまだ追いついていない、またはすでに先へ進んで
+    パッチ付きのタグが消えた）移動タグ（`8.6-cli-trixie`）のものを取り、php.net の情報で `PHP_VERSION` / `PHP_URL`・`PHP_ASC_URL` /
+    `PHP_SHA256` だけを pin の版に差し替える（上げる方向にも下げる方向にも）。`GPG_KEYS` と `.asc` の署名検証は上流のまま残す。
+    取った Dockerfile の `PHP_VERSION` が pin と一致しなければ止まる
+  - `officialDigest` は `null` でもよい。夜のジョブが版だけを上げたとき（公式イメージがまだ無い）にこうなる。
+    公式イメージが出たら Renovate が digest を埋める PR（pinDigest）を作る。CI とビルドは上の取り方で `null` のまま通る
 - `frankenphp`: 上流のタグと commit。Renovate が両方を同時に更新し、ビルドはタグが commit を指しているかを確かめる
 - `baseImages`: 上流の Dockerfile がタグだけで参照する親イメージ（docker-library/php の `FROM debian:trixie-slim`、
   FrankenPHP の bake の `golang-base` や `# syntax=docker/dockerfile:1` など）の digest。`php` と `frankenphp` に分けて持つ。
@@ -80,8 +80,8 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 ```json
 "8.5": {
   "os": "trixie",
-  "officialTag": "8.5-zts-trixie",
-  "officialDigest": "sha256:<docker buildx imagetools inspect php:8.5-zts-trixie の digest>"
+  "officialTag": "8.5.13-zts-trixie",
+  "officialDigest": "sha256:<docker buildx imagetools inspect php:8.5.13-zts-trixie の digest>"
 }
 ```
 
@@ -91,13 +91,16 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 
 ### 普段: Renovate の更新 PR のマージ
 
-1. docker-library/php が更新されて公式イメージが出直すと、Renovate が `officialDigest` を更新する PR を作り、自動マージする
-2. main への push で、差分のあった版の php を docker-library/php の Dockerfile からビルドし、続けて FrankenPHP をビルドする
-3. FrankenPHP の pin だけが変わったときは php のビルドを飛ばし、現行の php イメージで FrankenPHP をビルドする
-4. `baseImages.php` が変わったら php と FrankenPHP を、`baseImages.frankenphp` だけなら FrankenPHP を全版ビルドし直す
+Renovate が `versions.json` を更新する PR は次の 2 種類で、どちらも即時に自動マージする（冷却は消費側で行う）。
 
-php の Dockerfile は、official-images の `library/php` で追うタグの `GitCommit` と `Directory` を引き、
-その commit の docker-library/php のディレクトリを取得して使う。ワークフローやスクリプトなどビルドの入力が変わった push では全版をビルドし直す。
+- 版の更新: 公式イメージにパッチ版が出ると `officialTag` を `8.6.0-cli-trixie` → `8.6.1-cli-trixie` に上げ、digest も入れる（minor ごとに別の PR）
+- digest の更新: 同じ版の公式イメージが作り直されると `officialDigest` だけを更新する（debian の更新など）。`null` を埋める pinDigest も同じ扱い
+
+main への push で、差分のあった版の php をビルドし、続けて FrankenPHP をビルドする。
+
+- FrankenPHP の pin だけが変わったときは php のビルドを飛ばし、現行の php の移動タグ（版が pin と一致することを確かめる）の上に組む
+- `baseImages.php` が変わったら php と FrankenPHP を、`baseImages.frankenphp` だけなら FrankenPHP を全版ビルドし直す
+- ワークフローやスクリプトなどビルドの入力が変わった push では全版をビルドし直す
 
 ### 予告がある夜: 版を指定して待つ
 
@@ -105,34 +108,26 @@ php の Dockerfile は、official-images の `library/php` で追うタグの `G
 gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
 ```
 
-php.net で 8.6.1 が公開される（リリース情報に載り、tarball と署名が取れる）まで 3 分おきに確かめ、公開されたら
-上流の Dockerfile の `PHP_VERSION` / `PHP_URL`・`PHP_ASC_URL` / `PHP_SHA256` だけを差し替えてビルドする。
-`GPG_KEYS` は差し替えないので、`.asc` の署名検証は上流の Dockerfile のまま行われる。
+この run は自分では公開しない。
 
-- 約 5 時間 45 分のうちに公開されなければ、ビルドせずに run を失敗にする（翌朝に緑を見てビルド済みと誤解しないように）
-- official-images がすでにその版（以降）に追いついていれば、差し替えずにそのままビルドする
-- pin（`baseImages` と `frankenphp`）は dispatch した時点ではなく、公開を確認した時点の main のものを使う。
-  追うタグや os などそれ以外は dispatch した時点の値を使い、移動タグに載せるかの判定もこの「実際に使った値」で行う。
-  スクリプトとワークフローも dispatch した時点のもので動く（待機中に main で直したものは、その run には効かない）
-- FrankenPHP は必ずこの run がビルドした php の上に組む
-- 作ったイメージは php と FrankenPHP の移動タグに必ず載せる
-  - ビルド中に main の pin が進んで古い pin になったときは、タグを付けずに、同じ版を指定した run を自動で起動し直す
-    （新しい run は main の新しい pin で組み、php.net にはもう版があるのですぐビルドに入る）。この run は緑で終わり、
-    Summary に起動し直したことが出るので、結果は新しい run で確かめる。起動し直すのは 3 回までで、上限に達したら失敗にする。
-    再実行（Re-run）した待機 run でも同じように起動し直す
-  - 版の一方が下がる（conflict）など、pin を新しくしても直らないものは起動し直さずに失敗にする
-- 例外として、次のときは移動タグを動かさずに成功にする。どちらもセキュリティ版はすでに移動タグに載っている
-  - 現行の移動タグの方が新しい版を持つ（official-images がより新しい版に追いついたなど）。固定タグだけ付ける
-  - 同じ版が、新しい上流の Dockerfile で組まれてすでに移動タグにある。タグを付けない
-- 版を打ち間違えていないか、待ち始める前に確かめる。現行の移動タグより大きく、+3 パッチ以内でなければ待たずに失敗する
-  （移動タグがまだ無い初回は確かめない）
-- 待機中も普段のビルドは止まらない（待機 run は版ごとに別の concurrency グループ）
+1. php.net で 8.6.1 が公開される（リリース情報に載り、tarball と署名が取れる）まで 3 分おきに確かめる。
+   約 5 時間 45 分のうちに公開されなければ run を失敗にする（翌朝に緑を見て済んだと誤解しないように）
+2. 公開されたら、その時点の main から `versions.json` の 8.6 を `8.6.1-cli-trixie`（`officialDigest` は `null`）に上げる PR を作り、
+   auto-merge を有効にする（チェックが通ればマージキューに入る）。待っている間に main が進んでいても、PR は最新の main から作る
+3. 以降は普段の経路: PR の CI（php.net の情報で差し替えた Dockerfile の smoke build を含む）→ マージ → main の push の run が公開する
+4. 公式イメージが 8.6.1 を出すと、Renovate が `officialDigest` を埋める PR を作り、push の run が official の Dockerfile で組み直す
+
+- main がすでに 8.6.1 以上なら、何もせずに成功する。同じ版の PR がすでに開いていても何もしない
+- PR は専用の GitHub App のトークンで作る（GITHUB_TOKEN で作った PR では CI が起きないため）。コミットは署名が必須なので、
+  git push ではなく GitHub が署名する API（createCommitOnBranch）で作る
+- 待機中も普段のビルドは止まらない（待つ run は版ごとに別の concurrency グループ）
 
 ### 失敗したとき
 
 main の run でどれかのジョブが失敗・取り消しになると、Issue「build ワークフローが main で失敗している」を作る（開いていればコメントを足す）。
 
-- 待機 run（版を指定した dispatch）は、Re-run ではなく同じ版を指定して dispatch し直す（`redispatch-count` は 0 のまま）
+- 夜のジョブ（版を指定した dispatch）は、同じ版を指定して dispatch し直す。PR を作る前に落ちていても、作った後でも、重ねて走らせて問題ない
+  （同じ版の PR があるか main がすでにその版なら何もしない）
 - push の run は Re-run all jobs か、版を指定しない workflow_dispatch で直す。push の差分の基準は「最後に成功した push run」なので、
   失敗した変更は次の push の run にも含まれる
 - artifact は JSON が 7 日、FrankenPHP の OCI アーカイブが 3 日で消える。それより古い run は再実行できない
@@ -149,6 +144,13 @@ gh workflow run build.yml -R animalife/php-images
 packages: write を持つジョブ（php-build・php-publish・frankenphp-push・frankenphp-publish）がこの environment を使う。
 作る前に走らせると、GitHub が制限なしの environment を自動で作ってしまい、ブランチから dispatch した run も GHCR に書ける。
 
+夜のジョブには次が要る（デプロイブランチを main に限った environment `version-bump` を、bump ジョブが使う）。
+
+- GitHub App（php-images だけにインストール。権限は Contents: write、Pull requests: write、Metadata: read）
+- repository variable `VERSION_BUMP_APP_CLIENT_ID`: App の Client ID（空ならトークンを作る前に止まる）
+- environment `version-bump` の secret `VERSION_BUMP_APP_PRIVATE_KEY`: App の秘密鍵
+- リポジトリの「Allow auto-merge」と、main の ruleset のマージキュー（PR の auto-merge がキューに入るため）
+
 初回の公開のあと、GHCR のパッケージ（`php-images/php` と `php-images/frankenphp`）は private で作られる。
 パッケージの Package settings → Danger Zone → Change visibility で public にする。消費側のリポジトリから読めることも確かめる。
 
@@ -156,11 +158,13 @@ packages: write を持つジョブ（php-build・php-publish・frankenphp-push�
 
 - environment `ghcr-publish` のデプロイブランチの制限で、main 以外からの run の公開ジョブが止まること
 - マージキュー（merge_group）で ci.yml が走り、`CI Gate` が成功すること
-- ジョブ単位の `concurrency.queue: max`（publish ジョブ）が効き、待機中の公開が取り消されないこと
+- run 全体の `concurrency.queue: max` が効き、push の run が commit 順に直列で走ること
+- 夜のジョブが PR を作り（App のトークン、createCommitOnBranch の署名付きコミット）、auto-merge がマージキューに入ること
+- Renovate が `officialDigest: null` を埋める pinDigest の PR を、`versions.json` の書式を崩さずに作ること
 - `uses: $/.github/actions/publish-image` で composite action が解決されること
 - GHCR への push・attestation の push（`gh attestation verify` が通る）
 - main の run が失敗したときに Issue ができること（同名の Issue が開いていればコメントになること）
-- 待機 run で、main の `versions.json` を `git fetch origin main` で読み直せること
+- 公開ジョブで、main の `versions.json` を `git fetch origin main` で読めること
 - amd64 のビルド（手元では arm64 だけを確かめた）
 
 ## 開発
