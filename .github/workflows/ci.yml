@@ -74,14 +74,15 @@ jobs:
 
   # 上流の Dockerfile と bake の定義が、versions.json の baseImages に無い親イメージを参照していないかを
   # build.yml と同じ手順で確かめる。FrankenPHP の更新で上流が GO_VERSION を上げた場合などを、マージ前に止める。
-  # あわせて php を amd64 で push せずにビルドする（BuildKit・setup-buildx・checkout・setup-node の更新と、
-  # Dockerfile の取得と差し替えを、公開権限を持つ main の run より前に通す）。login・artifact・attest・
-  # create-github-app-token など main の run でしか動かない action はここでは通らないので、Renovate で手動マージにしている。
-  # 必須チェックと食い違わないよう paths では絞らない。
+  # あわせて php と FrankenPHP を amd64 で push せずにビルドする（BuildKit・setup-buildx・checkout・setup-node の更新、
+  # Dockerfile の取得と差し替え、FrankenPHP の pin の更新を、公開権限を持つ main の run より前に通す）。FrankenPHP は
+  # この job の php の結果（OCI layout）を php-base に使う（GHCR の php は、初回や pin が変わる PR ではまだ無いので読まない）。
+  # login・artifact・attest・create-github-app-token など main の run でしか動かない action はここでは通らないので、
+  # Renovate で手動マージにしている。必須チェックと食い違わないよう paths では絞らない。
   check-base-images:
-    name: check base images and smoke build php
+    name: check base images and smoke build php and frankenphp
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 90
     permissions:
       contents: read # checkout に必要
     steps:
@@ -118,9 +119,12 @@ jobs:
         with:
           driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
 
-      - name: Check php and FrankenPHP, smoke build php
+      - name: Check php and FrankenPHP, smoke build php and frankenphp
         env:
           GH_TOKEN: ${{ github.token }}
+          # 上流 docker-bake.hcl の secret（e-dant/watcher の取得）に渡る。この job の権限は contents: read だけ。
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
         run: |
           set -euo pipefail
           gh api repos/docker-library/official-images/contents/library/php \
@@ -163,15 +167,46 @@ jobs:
             fi
             echo "::endgroup::"
             echo "::group::smoke build php ${php_version}（linux/amd64、push しない）"
+            php_oci="${RUNNER_TEMP}/php-oci-${minor}"
             docker buildx build "${src}/${directory}" "${pin_args[@]}" --platform linux/amd64 --pull --provenance=false \
-              --output type=cacheonly
+              --output "type=oci,dest=${php_oci},tar=false,name=php-images/php:smoke"
             echo "::endgroup::"
-            echo "::group::frankenphp ${minor}"
+            echo "::group::smoke build frankenphp ${minor}（linux/amd64、push しない）"
             target="runner-php-${minor//./-}-${os}"
             (cd frankenphp && PHP_VERSION="${minor}" SHA='' docker buildx bake --print "${target}") > "${RUNNER_TEMP}/bake.json"
-            (cd frankenphp && GITHUB_OUTPUT=/dev/null KIND=frankenphp BAKE_FILE="${RUNNER_TEMP}/bake.json" TARGET="${target}" \
+            : > "${out}"
+            (cd frankenphp && GITHUB_OUTPUT="${out}" KIND=frankenphp BAKE_FILE="${RUNNER_TEMP}/bake.json" TARGET="${target}" \
               EXPECTED_PHP_BASE="docker-image://php:${moving}" VERSIONS_FILE="${GITHUB_WORKSPACE}/versions.json" \
               node ../scripts/pin-base-images.mjs)
+            fp_pin_json="$(sed -n 's/^args=//p' "${out}")"
+            fp_pin_count="$(sed -n 's/^count=//p' "${out}")"
+            if ! [[ "${fp_pin_count}" =~ ^[0-9]+$ ]]; then
+              echo "::error::pin の数が数値ではない: '${fp_pin_count}'"
+              exit 1
+            fi
+            mapfile -t fp_pin_args < <(jq -r '.[]' <<< "${fp_pin_json}")
+            if [ "${#fp_pin_args[@]}" -ne "${fp_pin_count}" ]; then
+              echo "::error::親イメージの pin の引数が ${#fp_pin_args[@]} 個で、${fp_pin_count} 個ではない"
+              exit 1
+            fi
+            fp_version="$(jq -er .frankenphp.version versions.json)"
+            fp_commit="$(jq -er .frankenphp.commit versions.json)"
+            # build.yml の Build OCI archive と同じ差し替え（php-base はこの job の php、出力は捨てる）。
+            # bake は作業ディレクトリの外のファイルを読むのに許可（--allow fs.read）を求める。
+            (cd frankenphp && PHP_VERSION="${minor}" VERSION="${fp_version}" SHA="${fp_commit}" LATEST=false \
+              docker buildx bake "${target}" \
+                --allow "fs.read=${php_oci}" \
+                --set "${target}.contexts.php-base=oci-layout://${php_oci}:smoke" \
+                "${fp_pin_args[@]}" \
+                --set "${target}.platform=linux/amd64" \
+                --set "${target}.tags=" \
+                --set "${target}.attest=type=provenance,disabled=true" \
+                --set "${target}.labels.org.opencontainers.image.source=${SOURCE}" \
+                --set "${target}.labels.org.opencontainers.image.revision=${GITHUB_SHA}" \
+                --set "${target}.labels.dev.animalife.php-images.frankenphp.revision=${fp_commit}" \
+                --set "${target}.labels.dev.animalife.php-images.php-base=smoke" \
+                --set "${target}.output=type=cacheonly")
+            rm -rf "${php_oci}"
             echo "::endgroup::"
           done
 

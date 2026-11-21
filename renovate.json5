@@ -212,7 +212,7 @@
             automerge: true,
         },
         {
-            description: 'FrankenPHP は即時に PR を作るが、手動マージにする（PR の CI では FrankenPHP をビルドしないので、壊れた更新が公開の run まで届く）',
+            description: 'FrankenPHP は即時に PR を作る。パッチには Caddy や Go のセキュリティ修正が入るので patch は自動マージ（PR の CI の smoke build が FrankenPHP を組む）、minor 以上は挙動の変化を含みうるので手動',
             matchDatasources: [
                 'github-tags',
             ],
@@ -223,6 +223,18 @@
             schedule: [
                 'at any time',
             ],
+        },
+        {
+            matchDatasources: [
+                'github-tags',
+            ],
+            matchPackageNames: [
+                'php/frankenphp',
+            ],
+            matchUpdateTypes: [
+                'patch',
+            ],
+            automerge: true,
         },
         {
             description: 'ランナーのラベル（runs-on の ubuntu-24.04 など）と .node-version のメジャー更新は提案させない。ランナーは versions.json の platforms にも書いてあり、片方だけ上がると食い違う。上げるときは両方を手で揃える',

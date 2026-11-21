@@ -64,7 +64,7 @@ php.net での公開からそのままパッチ入りのイメージを作るた
     到達できない（fork ネットワークの commit など）ときも止まる
   - `officialDigest` は `null` でもよい。夜のジョブが版だけを上げたとき（公式イメージがまだ無い）にこうなる。
     公式イメージが出たら Renovate が digest を埋める PR（pinDigest）を作る。CI とビルドは上の取り方で `null` のまま通る
-- `frankenphp`: 上流のタグと commit。Renovate が両方を同時に更新し（手動マージ）、ビルドはタグが commit を指しているかを確かめる
+- `frankenphp`: 上流のタグと commit。Renovate が両方を同時に更新し（patch は自動マージ、minor 以上は手動）、ビルドはタグが commit を指しているかを確かめる
 - `baseImages`: 上流の Dockerfile がタグだけで参照する親イメージ（docker-library/php の `FROM debian:trixie-slim`、
   FrankenPHP の bake の `golang-base` や `# syntax=docker/dockerfile:1` など）の digest。`php` と `frankenphp` に分けて持つ。
   上流の Dockerfile は書き換えず、名前付きコンテキスト（`--build-context` / bake の `contexts`）と `BUILDKIT_SYNTAX` で差し替える。
@@ -102,14 +102,15 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 
 ### 普段: Renovate の更新 PR のマージ
 
-Renovate が `versions.json` を更新する PR は次のとおり。php のものは即時に自動マージする（冷却は消費側で行う）。
+Renovate が `versions.json` を更新する PR は次のとおり。冷却は消費側で行う。
 
 - php の版の更新: 公式イメージにパッチ版が出ると `officialTag` を `8.6.0-cli-trixie` → `8.6.1-cli-trixie` に上げ、digest も入れる
   （minor ごとに別の PR）。自動マージ
 - php の digest の更新: 同じ版の公式イメージが作り直されると `officialDigest` だけを更新する（debian の更新など）。
   `null` を埋める pinDigest も同じ扱い。自動マージ
-- 親イメージ（`baseImages`）の digest の更新: 自動マージ。CI の smoke build（php）と親イメージの pin の検査を通る
-- FrankenPHP の更新（`frankenphp` のタグと commit）: 手動マージ。PR の CI では FrankenPHP をビルドしないため
+- 親イメージ（`baseImages`）の digest の更新: 自動マージ。CI の smoke build と親イメージの pin の検査を通る
+- FrankenPHP の更新（`frankenphp` のタグと commit）: patch は自動マージ（Caddy や Go のセキュリティ修正が入るため）、
+  minor 以上は手動マージ。CI の smoke build が、その PR の pin で FrankenPHP を組む
 
 main への push で、差分のあった版の php をビルドし、続けて FrankenPHP をビルドする。
 
@@ -226,7 +227,8 @@ AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua exec -- zizmor --persona pedantic .
   （公開権限や App の鍵を持つ main の run で初めて動くため）
 - aqua のツールの版を変えたら、その設定ごとに `AQUA_CONFIG=<設定> aqua update-checksum --prune` で checksum を作り直す。
   `.github/aqua.yaml` はビルドの入力（変えると全版を作り直す）、`.github/aqua-ci/aqua.yaml` は CI だけで使う
-- PR とマージキューでは `.github/workflows/ci.yml` が lint・テスト・親イメージの pin の検査・php の amd64 のビルド（push しない）・
+- PR とマージキューでは `.github/workflows/ci.yml` が lint・テスト・親イメージの pin の検査・php と FrankenPHP の amd64 のビルド
+  （push しない。FrankenPHP は同じジョブの php の OCI layout を php-base に使う）・
   Renovate 設定の検証・actions.lock の検証を行い、`CI Gate` に集約する
 
 ### GHCR の untagged
