@@ -183,7 +183,7 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node scripts/bump-php-version.mjs
 
-  # 夜の PR がマージされるまで見届ける。PR の CI の失敗、キューから外れた、conflict、閉じられた、期限（2 時間）切れなら
+  # 夜の PR がマージされるまで見届ける。PR の CI の失敗、キューから外れた、conflict、閉じられた、期限（4 時間）切れなら
   # この run を失敗にする。App が作った PR の失敗は App にしか通知されないので、run の失敗と Issue（failure-issue）に変えるため。
   # 読むだけなので App のトークンは渡さず GITHUB_TOKEN を使う。
   watch-bump:
@@ -191,7 +191,8 @@ jobs:
     needs: [plan, bump]
     if: ${{ needs.bump.outputs.pr != '' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 130
+    # 見届けの期限（DEADLINE_SECONDS の 4 時間）より手前で job が切られないように。
+    timeout-minutes: 250
     outputs:
       redispatch: ${{ steps.watch.outputs.redispatch }}
     permissions:
@@ -217,7 +218,7 @@ jobs:
           PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
           REDISPATCH_COUNT: ${{ needs.plan.outputs.redispatchCount }}
           INTERVAL_SECONDS: '60'
-          DEADLINE_SECONDS: '7200'
+          DEADLINE_SECONDS: '14400'
         run: node scripts/watch-bump-pr.mjs
 
   # 夜の PR が main と conflict した（同じ minor の digest 更新が先に入ったなど）ら、同じ版で build.yml を dispatch し直す。

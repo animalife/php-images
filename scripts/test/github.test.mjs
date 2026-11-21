@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isPermanentGraphqlError, isPermanentHttpStatus, prState, PR_STATE_QUERY } from '../lib/github.mjs';
 
-// 権限不足などの恒久的なエラーを一時的な失敗として扱うと、2 時間ポーリングを続けてから期限切れで落ちる。
+// 権限不足などの恒久的なエラーを一時的な失敗として扱うと、見届けの期限までポーリングを続けてから期限切れで落ちる。
 test('GraphQL の FORBIDDEN / NOT_FOUND / Resource not accessible は恒久的なエラー', () => {
   assert.equal(isPermanentGraphqlError([{ type: 'FORBIDDEN', message: 'x' }]), true);
   assert.equal(isPermanentGraphqlError([{ type: 'NOT_FOUND', message: 'x' }]), true);

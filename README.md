@@ -131,7 +131,7 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
 2. 公開されたら、その時点の main から `versions.json` の 8.6 を `8.6.1-cli-trixie`（`officialDigest` は `null`）に上げる PR を作り、
    auto-merge を有効にする（チェックが通ればマージキューに入る）。待っている間に main が進んでいても、PR は最新の main から作る
 3. 以降は普段の経路: PR の CI（php.net の情報で差し替えた Dockerfile の smoke build を含む）→ マージ → main の push の run が公開する
-4. この run は PR がマージされるまで見届ける（watch-bump）。2 時間以内にマージされない・PR が閉じられた・チェックが失敗した・
+4. この run は PR がマージされるまで見届ける（watch-bump）。4 時間以内にマージされない・PR が閉じられた・チェックが失敗した・
    auto-merge が外れたまま（マージキューに入っていない状態が 3 回続けて見えた）ときは run を失敗にする。App が作った PR の失敗は
    App にしか通知されないので、run の失敗と Issue に変えるため。マージキューに入っている間は待つ。権限不足などの恒久的な
    エラーは待たずに失敗にし、5xx・rate limit（429 と、rate limit を示す 403）・ネットワークの一時的なエラーだけ再試行する
@@ -140,7 +140,7 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
    - main がまだその版未満で conflict した（同じ minor の digest 更新が先に入ったなど）ときは、同じ版で build.yml を
      dispatch し直して成功で終える。新しい run は php.net の確認がすぐ済み、bump が conflict した PR を閉じて最新の main から
      作り直す。作り直した直後などで PR の mergeable が計算中（UNKNOWN）なら、bump は確定するまで待って読み直す（15 秒おき、
-     最大 10 回）。立て直しは 3 回まで（`redispatch-count` で数える）で、上限に達したら失敗にする。新しい run が失敗したときに
+     最大 10 回。確定しなければ auto-merge は触らずに見届けに進む。待つ間にマージされた・閉じられた PR は state で見分ける）。立て直しは 3 回まで（`redispatch-count` で数える）で、上限に達したら失敗にする。新しい run が失敗したときに
      人へ届くのは Issue だけ（下の「失敗したとき」）
 5. 公式イメージが 8.6.1 を出すと、Renovate が `officialDigest` を埋める PR を作り、push の run が official の Dockerfile で組み直す
 
@@ -204,6 +204,10 @@ org の設定で、Actions（GITHUB_TOKEN）から GHCR に新しいパッケー
 パッケージの Package settings → Danger Zone → Change visibility で public にする。消費側のリポジトリから読めることも確かめる。
 
 手元では確かめられなかったもの。
+
+- 最初の PR で CI の所要時間（PR の CI と merge_group の CI で、php と FrankenPHP を一から組む）を測り、見届けの期限
+  （4 時間）と、ruleset のマージキューの status check timeout（120 分の予定）が足りるかを見直すこと
+- マージキューに入っている PR について、GITHUB_TOKEN で `isInMergeQueue` と `autoMergeRequest` が正しく読めること
 
 - environment `ghcr-publish` のデプロイブランチの制限で、main 以外からの run の公開ジョブが止まること
 - マージキュー（merge_group）で ci.yml が走り、`CI Gate` が成功すること
