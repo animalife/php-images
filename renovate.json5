@@ -23,16 +23,17 @@
     },
     customManagers: [
         {
-            description: 'versions.json の php.<minor>: 追うタグ（officialTag）の公式イメージの digest。digest の変化 = docker-library 側の更新',
+            description: 'versions.json の php.<minor>: ビルドする版（パッチ付きの officialTag）と公式イメージの digest。夜のジョブが版だけを上げると digest は null になり、公式イメージの公開後に pinDigest で埋める。置き換えは versions.json の書式（scripts/lib/bump.mjs の formatVersions と同じ 2 スペースの JSON）を前提にする',
             customType: 'regex',
             managerFilePatterns: [
                 '/^versions\\.json$/',
             ],
             matchStrings: [
-                '"officialTag": "(?<currentValue>[^"]+)",\\s*"officialDigest": "(?<currentDigest>sha256:[0-9a-f]{64})"',
+                '"officialTag": "(?<currentValue>[^"]+)",\\s*"officialDigest": (?:"(?<currentDigest>sha256:[0-9a-f]{64})"|null)',
             ],
             depNameTemplate: 'php',
             datasourceTemplate: 'docker',
+            autoReplaceStringTemplate: '"officialTag": "{{{newValue}}}",\n      "officialDigest": {{#if newDigest}}"{{{newDigest}}}"{{else}}null{{/if}}',
         },
         {
             description: 'versions.json の baseImages: 上流の Dockerfile がタグで参照する親イメージ（FROM・bake の docker-image コンテキスト・# syntax=）の digest',
@@ -136,7 +137,7 @@
             automerge: true,
         },
         {
-            description: 'versions.json の docker イメージ（php の追うタグ・親イメージ）はタグを固定して digest だけを追う。タグの更新（php の 8.7、golang の 1.28 など）は提案させない。上流が親イメージのタグを変えたらビルドが止まるので、そのとき手で直す',
+            description: 'versions.json の docker イメージは、php のパッチ版の更新（8.6.0 → 8.6.1）と digest の更新だけを提案させる。minor 以上（php の 8.7）や親イメージのタグの更新（golang の 1.28 など）は提案させない。上流が親イメージのタグを変えたらビルドが止まるので、そのとき手で直す',
             matchFileNames: [
                 'versions.json',
             ],
@@ -151,7 +152,31 @@
             enabled: false,
         },
         {
-            description: 'versions.json の digest 更新は即時・自動マージ（docker-library の更新や親イメージの更新を手放しで本番イメージへ届ける経路）',
+            matchFileNames: [
+                'versions.json',
+            ],
+            matchDepNames: [
+                'php',
+            ],
+            matchUpdateTypes: [
+                'patch',
+            ],
+            enabled: true,
+            // 既定の php-8.x だと複数の minor のパッチ更新が 1 つのブランチにまとまるので、minor ごとに分ける。
+            branchTopic: '{{{depNameSanitized}}}-{{{newMajor}}}.{{{newMinor}}}.x',
+        },
+        {
+            description: '夜のジョブが版だけを上げて digest が null の追うタグに、公式イメージの公開後に digest を入れる',
+            matchFileNames: [
+                'versions.json',
+            ],
+            matchDepNames: [
+                'php',
+            ],
+            pinDigests: true,
+        },
+        {
+            description: 'versions.json の php のパッチ版・digest の更新は即時・自動マージ（docker-library の更新や親イメージの更新を手放しで本番イメージへ届ける経路）。冷却は消費側で行う',
             matchFileNames: [
                 'versions.json',
             ],
@@ -159,7 +184,9 @@
                 'docker',
             ],
             matchUpdateTypes: [
+                'patch',
                 'digest',
+                'pinDigest',
             ],
             minimumReleaseAge: null,
             schedule: [
