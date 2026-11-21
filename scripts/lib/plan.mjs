@@ -63,7 +63,7 @@ export function phpPin(v, minor) {
 }
 
 const BUILD_INPUTS = [
-  /^\.github\/workflows\/build\.yml$/,
+  /^\.github\/workflows\/(build\.yml|actions\.lock)$/,
   /^\.github\/actions\//,
   /^\.github\/aqua(-checksums\.json|\.yaml)$/,
   /^\.node-version$/,

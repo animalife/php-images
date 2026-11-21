@@ -1,5 +1,5 @@
 import { bumpAction, bumpBranch, bumpVersions, formatVersions } from './lib/bump.mjs';
-import { client, PR_STATE_QUERY, prState } from './lib/github.mjs';
+import { client, PR_BUMP_QUERY, prState } from './lib/github.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';
 
 main(async () => {
@@ -15,8 +15,11 @@ main(async () => {
   const next = bumpVersions(JSON.parse(Buffer.from(file.content, 'base64').toString('utf8')), version);
 
   const open = await rest('GET', `/repos/${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`);
-  const openPr = open.length === 0 ? null : prState(await graphql(PR_STATE_QUERY, { owner, name, number: open[0].number }));
-  const action = bumpAction({ needed: next !== null, openPr: openPr && { number: open[0].number, autoMergeRequest: openPr.autoMergeRequest, isInMergeQueue: openPr.isInMergeQueue } });
+  const openPr = open.length === 0 ? null : prState(await graphql(PR_BUMP_QUERY, { owner, name, number: open[0].number }));
+  const action = bumpAction({
+    needed: next !== null,
+    openPr: openPr && { number: open[0].number, mergeable: openPr.mergeable, autoMergeRequest: openPr.autoMergeRequest, isInMergeQueue: openPr.isInMergeQueue },
+  });
 
   async function deleteBranch() {
     if (await rest('GET', `/repos/${repo}/git/ref/heads/${branch}`, undefined, { allow404: true })) {
@@ -58,6 +61,11 @@ main(async () => {
     return;
   }
 
+  if (action.kind === 'recreate') {
+    // 同じ minor の digest 更新などが先に main に入って conflict した PR は、閉じて最新の main から作り直す。
+    await rest('PATCH', `/repos/${repo}/pulls/${action.pr}`, { state: 'closed' });
+    console.log(`PR #${action.pr} は main と conflict しているので閉じて作り直す`);
+  }
   // 前回の失敗で枝だけ残っていれば消して作り直す（force での付け替えは、枝の ruleset で禁止されうるので使わない）。
   await deleteBranch();
   await rest('POST', `/repos/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: head });

@@ -16,6 +16,11 @@ on:
         required: false
         type: string
         default: ''
+      redispatch-count:
+        description: '夜の PR が conflict したために dispatch し直された回数（自動で付く。手で dispatch するときは 0 のまま）'
+        required: false
+        type: string
+        default: '0'
 
 permissions: {}
 
@@ -49,6 +54,7 @@ jobs:
       frankenphpCommit: ${{ steps.plan.outputs.frankenphpCommit }}
       platformCount: ${{ steps.plan.outputs.platformCount }}
       waitFor: ${{ steps.plan.outputs.waitFor }}
+      redispatchCount: ${{ steps.plan.outputs.redispatchCount }}
     steps:
       # dispatch した ref の workflow ファイルが実行されるので、ブランチ上で外せば素通りできる
       # （強制力のある境界ではなく誤操作のガード）。skip ではなく失敗にして誤 ref に気付けるようにする。
@@ -88,6 +94,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PHP_VERSION_INPUT: ${{ inputs.php-version }}
+          REDISPATCH_COUNT_INPUT: ${{ inputs.redispatch-count }}
           BEFORE_SHA: ${{ steps.base.outputs.sha }}
         run: node scripts/plan.mjs
 
@@ -185,6 +192,8 @@ jobs:
     if: ${{ needs.bump.outputs.pr != '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 130
+    outputs:
+      redispatch: ${{ steps.watch.outputs.redispatch }}
     permissions:
       contents: write # 先を越された夜の PR の枝を消すのに必要（checkout にも使う）
       pull-requests: write # PR の状態を読む・残った PR を閉じるのに必要
@@ -201,13 +210,43 @@ jobs:
           package-manager-cache: false
 
       - name: Watch
+        id: watch
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ needs.bump.outputs.pr }}
           PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
+          REDISPATCH_COUNT: ${{ needs.plan.outputs.redispatchCount }}
           INTERVAL_SECONDS: '60'
           DEADLINE_SECONDS: '7200'
         run: node scripts/watch-bump-pr.mjs
+
+  # 夜の PR が main と conflict した（同じ minor の digest 更新が先に入ったなど）ら、同じ版で build.yml を dispatch し直す。
+  # 新しい run は php.net の確認がすぐ済み、bump が conflict した PR を閉じて最新の main から作り直す。回数の上限は
+  # scripts/lib/publish.mjs の MAX_REDISPATCH。GITHUB_TOKEN の workflow_dispatch は新しい run を作れる。
+  redispatch:
+    name: Redispatch the night job
+    needs: [plan, watch-bump]
+    if: ${{ needs.watch-bump.outputs.redispatch == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write # workflow_dispatch に必要
+    steps:
+      - name: Dispatch build.yml again
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
+          COUNT: ${{ needs.plan.outputs.redispatchCount }}
+        run: |
+          set -euo pipefail
+          next=$((COUNT + 1))
+          gh workflow run build.yml --repo "${GITHUB_REPOSITORY}" --ref main -f php-version="${PHP_VERSION}" -f redispatch-count="${next}"
+          {
+            echo "### 夜のジョブを起動し直した"
+            echo ""
+            echo "PHP ${PHP_VERSION} の PR が main と conflict したので、最新の main から PR を作り直す run を起動した（${next} 回目）。"
+            echo "結果は Actions の一覧にある新しい run で確かめる。"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
   # 両アーキを同じ Dockerfile でビルドするため、取得と差し替えは版ごとに 1 回だけ行い、コンテキストを配る。
   php-prepare:
@@ -248,6 +287,12 @@ jobs:
           OFFICIAL_TAG: ${{ matrix.officialTag }}
           MOVING_TAG: ${{ matrix.movingTag }}
         run: node scripts/resolve-official.mjs
+
+      - name: Verify the upstream commit is on the default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GIT_COMMIT: ${{ steps.resolve.outputs.gitCommit }}
+        run: node scripts/verify-upstream-commit.mjs
 
       - name: Checkout docker-library/php
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -911,7 +956,7 @@ jobs:
   # （scripts/failure-issue.mjs）。
   failure-issue:
     name: Failure issue
-    needs: [plan, wait, bump, watch-bump, php-prepare, php-build, php-test, php-publish, frankenphp-plan, frankenphp-build, frankenphp-push, frankenphp-test, frankenphp-publish]
+    needs: [plan, wait, bump, watch-bump, redispatch, php-prepare, php-build, php-test, php-publish, frankenphp-plan, frankenphp-build, frankenphp-push, frankenphp-test, frankenphp-publish]
     if: ${{ always() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

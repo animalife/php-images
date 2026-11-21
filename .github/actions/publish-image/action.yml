@@ -84,7 +84,6 @@ runs:
     # 古さは、この run の versions.json（checkout したもの）と main の先端のもの、および
     # この run の commit から main の先端までに変わったファイル（ビルドの入力に当たるか）で決める。
     - name: Fetch versions.json on main and the changed files
-      id: main
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -92,7 +91,6 @@ runs:
         set -euo pipefail
         git fetch --depth 1 origin main
         git show FETCH_HEAD:versions.json > "${RUNNER_TEMP}/main-versions.json"
-        echo "sha=$(git rev-parse FETCH_HEAD)" >> "${GITHUB_OUTPUT}"
         gh api --paginate "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...$(git rev-parse FETCH_HEAD)" \
           --jq '.files[]?.filename' > "${RUNNER_TEMP}/changed-files"
 
@@ -108,7 +106,6 @@ runs:
         RUN_VERSIONS_FILE: versions.json
         MAIN_VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
         CHANGED_FILES_FILE: ${{ runner.temp }}/changed-files
-        MAIN_SHA: ${{ steps.main.outputs.sha }}
       run: node scripts/publish-tags.mjs
 
     - name: Tag

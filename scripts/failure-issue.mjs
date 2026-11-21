@@ -15,7 +15,12 @@ main(async () => {
   const runUrl = env('RUN_URL');
   const failed = Object.entries(results).filter(([, v]) => v.result === 'failure' || v.result === 'cancelled');
 
-  const open = await rest('GET', `/repos/${repo}/issues?state=open&per_page=100`);
+  const open = [];
+  for (let page = 1; ; page += 1) {
+    const batch = await rest('GET', `/repos/${repo}/issues?state=open&per_page=100&page=${page}`);
+    open.push(...batch);
+    if (batch.length < 100) break;
+  }
   const byTitle = (title) => open.find((i) => !i.pull_request && i.title === title) ?? null;
 
   if (failed.length > 0) {

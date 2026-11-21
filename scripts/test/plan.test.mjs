@@ -201,4 +201,5 @@ test('buildInputsChanged はビルドの入力に当たるファイルだけを�
   assert.equal(buildInputsChanged(['README.md', 'versions.json', '.github/workflows/ci.yml']), false);
   assert.equal(buildInputsChanged(['scripts/lib/publish.mjs']), true);
   assert.equal(buildInputsChanged(['.github/workflows/build.yml']), true);
+  assert.equal(buildInputsChanged(['.github/workflows/actions.lock']), true);
 });

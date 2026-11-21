@@ -1,5 +1,21 @@
 const API = 'https://api.github.com';
 
+// 恒久的なエラー（権限不足・存在しないなど）は再試行しても直らないので、すぐ失敗させる。
+export function isPermanentHttpStatus(status) {
+  return status >= 400 && status < 500 && status !== 429;
+}
+
+export function isPermanentGraphqlError(errors) {
+  return errors.some((e) => ['FORBIDDEN', 'NOT_FOUND'].includes(e.type) || /Resource not accessible/i.test(e.message ?? ''));
+}
+
+export class ApiError extends Error {
+  constructor(message, permanent) {
+    super(message);
+    this.permanent = permanent;
+  }
+}
+
 export function client(token) {
   const headers = {
     authorization: `Bearer ${token}`,
@@ -11,17 +27,25 @@ export function client(token) {
       method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(30_000),
     });
     if (allow404 && res.status === 404) return null;
-    if (!res.ok) throw new Error(`${method} ${path}: HTTP ${res.status} ${await res.text()}`);
+    if (!res.ok) throw new ApiError(`${method} ${path}: HTTP ${res.status} ${await res.text()}`, isPermanentHttpStatus(res.status));
     return res.status === 204 ? null : res.json();
   }
   async function graphql(query, variables) {
     const out = await rest('POST', '/graphql', { query, variables });
-    if (out.errors) throw new Error(`GraphQL: ${JSON.stringify(out.errors)}`);
+    if (out.errors) throw new ApiError(`GraphQL: ${JSON.stringify(out.errors)}`, isPermanentGraphqlError(out.errors));
     return out.data;
   }
   return { rest, graphql };
 }
 
+// bump（App のトークン）用。App には Checks / Commit statuses の権限が無いので、statusCheckRollup や mergeQueueEntry を読まない。
+export const PR_BUMP_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { id state mergeable url isInMergeQueue autoMergeRequest { enabledAt } }
+  }
+}`;
+
+// watch-bump（GITHUB_TOKEN、checks / statuses の読み取り付き）用。
 export const PR_STATE_QUERY = `query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
@@ -41,7 +65,7 @@ export function prState(data) {
     state: pr.state,
     mergeable: pr.mergeable,
     autoMergeRequest: pr.autoMergeRequest,
-    isInMergeQueue: pr.isInMergeQueue === true || pr.mergeQueueEntry !== null,
-    rollup: pr.commits.nodes[0]?.commit.statusCheckRollup?.state ?? null,
+    isInMergeQueue: pr.isInMergeQueue === true || (pr.mergeQueueEntry ?? null) !== null,
+    rollup: pr.commits?.nodes[0]?.commit.statusCheckRollup?.state ?? null,
   };
 }

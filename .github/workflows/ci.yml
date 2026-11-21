@@ -141,6 +141,7 @@ jobs:
               node scripts/resolve-official.mjs
             commit="$(sed -n 's/^gitCommit=//p' "${out}")"
             directory="$(sed -n 's/^directory=//p' "${out}")"
+            GIT_COMMIT="${commit}" node scripts/verify-upstream-commit.mjs
             src="${RUNNER_TEMP}/php-${minor}"
             git init -q "${src}"
             git -C "${src}" fetch -q --depth 1 https://github.com/docker-library/php.git "${commit}"
@@ -220,12 +221,8 @@ jobs:
           fi
           gh extension install github/gh-actions-lock --pin "${GH_ACTIONS_LOCK_VERSION}"
 
-      # lockfile の再生成は `gh actions-lock --no-narrow` で行う（Renovate と同じフラグ。--no-narrow は v4 のような
-      # 浮動の ref を v4.2.1 に絞らないだけ）。uses: の完全な SHA が残るのは、このリポジトリで Actions の設定
-      # sha_pinning_required が有効だからで、無効だと gh actions-lock は SHA をタグ参照に置き換え、zizmor の
-      # unpinned-uses で落ちる（2026-11-21、gh-actions-lock v0.4.1。remote の無い複製では --no-narrow 付きでも置き換わり、
-      # remote を animalife/php-images にすると置き換わらないことを確認。設定は
-      # gh api repos/animalife/php-images/actions/permissions --jq .sha_pinning_required で読める）。
+      # lockfile の再生成は `gh actions-lock --no-narrow` で行う（Renovate と同じフラグ）。
+      # uses: の SHA の固定は、Actions の設定 sha_pinning_required とこの verify で守られる。
       - name: Verify actions.lock
         env:
           GH_TOKEN: ${{ github.token }}

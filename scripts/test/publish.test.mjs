@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pinsStale, decidePublish, tagsToApply, planFrankenphp, assessPr, needsMainCheck } from '../lib/publish.mjs';
+import { pinsStale, decidePublish, tagsToApply, planFrankenphp, assessPr, needsMainCheck, nextSuspectCount, canRedispatch } from '../lib/publish.mjs';
 
 const digest = (c) => `sha256:${c.repeat(64)}`;
 const versions = () => ({
@@ -66,7 +66,6 @@ test('キーの順序が違うだけなら古くない', () => {
 
 test('pin が main の先端と一致すれば固定タグと移動タグを付ける', () => {
   assert.equal(decidePublish({ stale: false, runAttempt: '1' }), 'move');
-  assert.equal(decidePublish({ stale: false, runAttempt: '2' }), 'move');
 });
 
 // 古い pin で組んだ run が、新しい pin のビルドを巻き戻さないため。main が先に進んでいれば、その push の run が組み直す。
@@ -78,6 +77,12 @@ test('pin が古ければタグを付けない', () => {
 test('再実行した run の pin が古ければ失敗', () => {
   assert.throws(() => decidePublish({ stale: true, runAttempt: '2' }), /再実行/);
   assert.throws(() => decidePublish({ stale: false, runAttempt: '' }), /RUN_ATTEMPT/);
+});
+
+// 事件: 同じ commit で先に dispatch が公開し、そのあと古い push run を Re-run failed jobs すると、pin も入力も同じなので
+// 古いアーカイブで移動タグを上書きできた。復旧は版を指定しない dispatch に一本化する。
+test('再実行した run は、pin が古くなくても公開しない', () => {
+  assert.throws(() => decidePublish({ stale: false, runAttempt: '2' }), /dispatch/);
 });
 
 test('付けるタグは判定で決まる', () => {
@@ -116,12 +121,10 @@ test('assessPr: マージされれば merged、チェック中・キュー待ち
 });
 
 // 夜の PR が CI やキューで落ちても、App にしか通知が行かず誰も気付けなかったため、run を失敗させて人に届ける。
-test('assessPr: 閉じられた・conflict・チェックの失敗・auto-merge が外れたなら例外', () => {
+test('assessPr: 閉じられた・チェックの失敗なら例外', () => {
   assert.throws(() => assessPr(pr({ state: 'CLOSED' })), /閉じられた/);
-  assert.throws(() => assessPr(pr({ mergeable: 'CONFLICTING' })), /conflict/);
   assert.throws(() => assessPr(pr({ rollup: 'FAILURE' })), /チェック/);
   assert.throws(() => assessPr(pr({ rollup: 'ERROR' })), /チェック/);
-  assert.throws(() => assessPr(pr({ autoMergeRequest: null })), /auto-merge/);
 });
 
 // auto-merge 経由でマージキューに入ると autoMergeRequest が消えうる（未確定）。どちらでも誤報にならないよう、
@@ -136,7 +139,7 @@ test('assessPr: マージキューに入っている間は auto-merge が無く�
 test('assessPr: conflict・閉じられたでも、main がすでにその版以上なら superseded', () => {
   assert.equal(assessPr(pr({ mergeable: 'CONFLICTING' }), { mainCovers: true }), 'superseded');
   assert.equal(assessPr(pr({ state: 'CLOSED' }), { mainCovers: true }), 'superseded');
-  assert.throws(() => assessPr(pr({ mergeable: 'CONFLICTING' }), { mainCovers: false }), /conflict/);
+  assert.equal(assessPr(pr({ mergeable: 'CONFLICTING' }), { mainCovers: false }), 'conflict');
 });
 
 test('assessPr: main がその版以上かを確かめる必要があるのは、閉じられた・conflict のときだけ', () => {
@@ -146,10 +149,23 @@ test('assessPr: main がその版以上かを確かめる必要があるのは�
   assert.equal(needsMainCheck(pr({})), false);
 });
 
-// 再実行（Re-run failed jobs）は最大 3 日前のアーカイブを使うので、pin とビルドの入力が同じでも、
-// main の先端の commit の run でなければ公開しない（Debian のパッケージが後退しうる）。
-test('decidePublish: 再実行した run は、main の先端の commit でなければ失敗', () => {
-  assert.throws(() => decidePublish({ stale: false, runAttempt: '2', atMainHead: false }), /先端/);
-  assert.equal(decidePublish({ stale: false, runAttempt: '2', atMainHead: true }), 'move');
-  assert.equal(decidePublish({ stale: false, runAttempt: '1', atMainHead: false }), 'move');
+// キューに入る瞬間やマージ完了の瞬間に、キュー外で auto-merge が null の状態が一瞬見える。1 回で失敗にすると誤報になる。
+test('assessPr: キュー外で auto-merge が null なら suspect（すぐには失敗にしない）', () => {
+  assert.equal(assessPr(pr({ autoMergeRequest: null })), 'suspect');
+});
+
+test('nextSuspectCount: suspect が 3 回続いたら失敗、それ以外を見たら数え直す', () => {
+  assert.equal(nextSuspectCount(0, 'suspect'), 1);
+  assert.equal(nextSuspectCount(1, 'suspect'), 2);
+  assert.throws(() => nextSuspectCount(2, 'suspect'), /auto-merge/);
+  assert.equal(nextSuspectCount(2, 'pending'), 0);
+});
+
+// 夜の PR は officialTag と officialDigest を書き換えるので、同じ minor の digest 更新が先に入ると conflict になる。
+// その版はまだ main に無いので、同じ版で dispatch し直して main から作り直す。ループしないよう回数に上限を置く。
+test('canRedispatch: conflict の立て直しは 3 回まで', () => {
+  assert.equal(canRedispatch('0'), true);
+  assert.equal(canRedispatch('2'), true);
+  assert.equal(canRedispatch('3'), false);
+  assert.throws(() => canRedispatch('x'), /回数/);
 });

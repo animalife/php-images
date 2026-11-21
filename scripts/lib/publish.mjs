@@ -19,17 +19,13 @@ export function pinsStale(runVersions, mainVersions, kind, minor) {
 
 // run は commit 順に直列で走るので、普段は move しかない。main が先へ進んでいれば後続の run が組み直すので、
 // この run はタグに触れない。再実行した run にはその前提が成り立たないので失敗にする。
-export function decidePublish({ stale, runAttempt, atMainHead = true }) {
+export function decidePublish({ stale, runAttempt }) {
   if (!/^[1-9]\d*$/.test(runAttempt ?? '')) throw new Error(`RUN_ATTEMPT が不正: '${runAttempt}'`);
-  // 再実行は最大 3 日前のアーカイブを使う。pin とビルドの入力が同じでも、apt のパッケージなどが後退しうる。
-  if (runAttempt !== '1' && !atMainHead) {
-    throw new Error('再実行した run の commit が main の先端ではないので公開しない。main の先端で版を指定しない workflow_dispatch を走らせる');
-  }
-  if (!stale) return 'move';
+  // 再実行は古いアーカイブ（最大 3 日前）で、後から公開された同じ版の中身を上書きしうるので、公開しない。
   if (runAttempt !== '1') {
-    throw new Error('再実行した run の pin は main の先端より古いので公開しない。main の先端で版を指定しない workflow_dispatch を走らせる');
+    throw new Error(`再実行した run では公開しない${stale ? '（pin も main の先端より古い）' : ''}。main で版を指定しない workflow_dispatch を走らせて直す`);
   }
-  return 'skip';
+  return stale ? 'skip' : 'move';
 }
 
 export function tagsToApply(decision, image, { fixed, moving }) {
@@ -57,13 +53,30 @@ export function needsMainCheck({ state, mergeable }) {
 
 // 夜の PR の状態。rollup は statusCheckRollup.state（チェックが無ければ null）。mainCovers は main の versions.json が
 // すでにその版以上か（閉じられた・conflict のときだけ要る）。
+// 戻り値: merged / superseded（main がすでにその版以上）/ conflict（main がまだその版未満）/ pending /
+// suspect（キュー外で auto-merge が無い。キューに入る瞬間やマージ完了の瞬間にも一瞬見えるので、続いたときだけ失敗）。
 export function assessPr({ state, mergeable, autoMergeRequest, rollup, isInMergeQueue = false }, { mainCovers = false } = {}) {
   if (state === 'MERGED') return 'merged';
   if (needsMainCheck({ state, mergeable }) && mainCovers) return 'superseded';
   if (state === 'CLOSED') throw new Error('PR がマージされずに閉じられた');
-  if (mergeable === 'CONFLICTING') throw new Error('PR が main と conflict している');
+  if (mergeable === 'CONFLICTING') return 'conflict';
   if (isInMergeQueue) return 'pending';
   if (rollup === 'FAILURE' || rollup === 'ERROR') throw new Error('PR のチェックが失敗した');
-  if (autoMergeRequest === null) throw new Error('PR の auto-merge が外れた（マージキューから外されたなど）');
+  if (autoMergeRequest === null) return 'suspect';
   return 'pending';
+}
+
+const SUSPECT_LIMIT = 3;
+
+export function nextSuspectCount(prev, result) {
+  if (result !== 'suspect') return 0;
+  if (prev + 1 >= SUSPECT_LIMIT) throw new Error(`PR の auto-merge が外れたまま（${SUSPECT_LIMIT} 回続けて確認）。マージキューから外されたなど`);
+  return prev + 1;
+}
+
+export const MAX_REDISPATCH = 3;
+
+export function canRedispatch(count) {
+  if (!/^\d+$/.test(count ?? '')) throw new Error(`立て直しの回数が不正: '${count}'`);
+  return Number(count) < MAX_REDISPATCH;
 }

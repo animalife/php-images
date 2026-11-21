@@ -39,11 +39,10 @@ php.net での公開からそのままパッチ入りのイメージを作るた
   `versions.json` の pin で、run は commit 順に直列で走る（build.yml の concurrency）。
   - この run の `versions.json` と main の先端の `versions.json` が、そのイメージに関わる pin（php では `baseImages.php` と
     その版の設定（`officialDigest` を含む）、FrankenPHP ではそれに `baseImages.frankenphp` と `frankenphp` を足したもの）で
-    一致しないか、この run の commit から main の先端までにビルドの入力（build.yml・composite action・scripts・tests・
+    一致しないか、この run の commit から main の先端までにビルドの入力（build.yml・actions.lock・composite action・scripts・tests・
     `.github/aqua.yaml`・`.node-version`）が変わっていれば、タグを付けずに成功で終える（main の先の commit の run が組み直す）。
-    再実行（Re-run）した run なら失敗にする（古いアーカイブで新しい run の中身を上書きしないように）。
-    再実行した run は、pin とビルドの入力が同じでも、run の commit が main の先端でなければ失敗にする（最大 3 日前の
-    アーカイブで、apt のパッケージなどが後退しうるため）。
+    再実行（Re-run）した run は、pin が古いかどうかに関わらず公開せずに失敗にする（古いアーカイブで、後から公開された
+    同じ版の中身を上書きしうるため）。成功済みの run を Re-run しても何も公開しない。復旧は版を指定しない dispatch で行う。
     php をこの理由でタグなしにした版は、FrankenPHP もその版は組まない（失敗にはしない）。
     後続の run は main への push で起きることを前提にしている。`[skip ci]` などでワークフローが起きない push だと
     組み直されないので、そのときは版を指定しない workflow_dispatch で全部ビルドし直す
@@ -61,10 +60,11 @@ php.net での公開からそのままパッチ入りのイメージを作るた
     パッチ付きのタグがあればその `GitCommit` / `Directory`、無ければ（official がまだ追いついていない、またはすでに先へ進んで
     パッチ付きのタグが消えた）移動タグ（`8.6-cli-trixie`）のものを取り、php.net の情報で `PHP_VERSION` / `PHP_URL`・`PHP_ASC_URL` /
     `PHP_SHA256` だけを pin の版に差し替える（上げる方向にも下げる方向にも）。`GPG_KEYS` と `.asc` の署名検証は上流のまま残す。
-    取った Dockerfile の `PHP_VERSION` が pin と一致しなければ止まる
+    取った Dockerfile の `PHP_VERSION` が pin と一致しなければ止まる。`GitCommit` が docker-library/php の既定ブランチから
+    到達できない（fork ネットワークの commit など）ときも止まる
   - `officialDigest` は `null` でもよい。夜のジョブが版だけを上げたとき（公式イメージがまだ無い）にこうなる。
     公式イメージが出たら Renovate が digest を埋める PR（pinDigest）を作る。CI とビルドは上の取り方で `null` のまま通る
-- `frankenphp`: 上流のタグと commit。Renovate が両方を同時に更新し、ビルドはタグが commit を指しているかを確かめる
+- `frankenphp`: 上流のタグと commit。Renovate が両方を同時に更新し（手動マージ）、ビルドはタグが commit を指しているかを確かめる
 - `baseImages`: 上流の Dockerfile がタグだけで参照する親イメージ（docker-library/php の `FROM debian:trixie-slim`、
   FrankenPHP の bake の `golang-base` や `# syntax=docker/dockerfile:1` など）の digest。`php` と `frankenphp` に分けて持つ。
   上流の Dockerfile は書き換えず、名前付きコンテキスト（`--build-context` / bake の `contexts`）と `BUILDKIT_SYNTAX` で差し替える。
@@ -102,10 +102,14 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 
 ### 普段: Renovate の更新 PR のマージ
 
-Renovate が `versions.json` を更新する PR は次の 2 種類で、どちらも即時に自動マージする（冷却は消費側で行う）。
+Renovate が `versions.json` を更新する PR は次のとおり。php のものは即時に自動マージする（冷却は消費側で行う）。
 
-- 版の更新: 公式イメージにパッチ版が出ると `officialTag` を `8.6.0-cli-trixie` → `8.6.1-cli-trixie` に上げ、digest も入れる（minor ごとに別の PR）
-- digest の更新: 同じ版の公式イメージが作り直されると `officialDigest` だけを更新する（debian の更新など）。`null` を埋める pinDigest も同じ扱い
+- php の版の更新: 公式イメージにパッチ版が出ると `officialTag` を `8.6.0-cli-trixie` → `8.6.1-cli-trixie` に上げ、digest も入れる
+  （minor ごとに別の PR）。自動マージ
+- php の digest の更新: 同じ版の公式イメージが作り直されると `officialDigest` だけを更新する（debian の更新など）。
+  `null` を埋める pinDigest も同じ扱い。自動マージ
+- 親イメージ（`baseImages`）の digest の更新: 自動マージ。CI の smoke build（php）と親イメージの pin の検査を通る
+- FrankenPHP の更新（`frankenphp` のタグと commit）: 手動マージ。PR の CI では FrankenPHP をビルドしないため
 
 main への push で、差分のあった版の php をビルドし、続けて FrankenPHP をビルドする。
 
@@ -126,11 +130,16 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
 2. 公開されたら、その時点の main から `versions.json` の 8.6 を `8.6.1-cli-trixie`（`officialDigest` は `null`）に上げる PR を作り、
    auto-merge を有効にする（チェックが通ればマージキューに入る）。待っている間に main が進んでいても、PR は最新の main から作る
 3. 以降は普段の経路: PR の CI（php.net の情報で差し替えた Dockerfile の smoke build を含む）→ マージ → main の push の run が公開する
-4. この run は PR がマージされるまで見届ける（watch-bump）。2 時間以内にマージされない・PR が閉じられた・conflict になった・
-   チェックが失敗した・auto-merge が外れた（マージキューに入っていないのに）ときは run を失敗にする。App が作った PR の失敗は
-   App にしか通知されないので、dispatch した人に届けるため。マージキューに入っている間は待つ。
-   閉じられた・conflict のときでも、main の `versions.json` がすでにその版以上なら（official が追いついて Renovate の patch PR が
-   先にマージされたなど）成功にし、残った PR を閉じて枝を消す
+4. この run は PR がマージされるまで見届ける（watch-bump）。2 時間以内にマージされない・PR が閉じられた・チェックが失敗した・
+   auto-merge が外れたまま（マージキューに入っていない状態が 3 回続けて見えた）ときは run を失敗にする。App が作った PR の失敗は
+   App にしか通知されないので、dispatch した人に届けるため。マージキューに入っている間は待つ。権限不足などの恒久的なエラーは
+   待たずに失敗にし、5xx やネットワークの一時的なエラーだけ再試行する
+   - 閉じられた・conflict のときでも、main の `versions.json` がすでにその版以上なら（official が追いついて Renovate の
+     patch PR が先にマージされたなど）成功にし、残った PR を閉じて枝を消す
+   - main がまだその版未満で conflict した（同じ minor の digest 更新が先に入ったなど）ときは、同じ版で build.yml を
+     dispatch し直して成功で終える。新しい run は php.net の確認がすぐ済み、bump が conflict した PR を閉じて最新の main から
+     作り直す。立て直しは 3 回まで（`redispatch-count` で数える）で、上限に達したら失敗にする。新しい run が失敗すれば、
+     その run の失敗として通知と Issue が出る
 5. 公式イメージが 8.6.1 を出すと、Renovate が `officialDigest` を埋める PR を作り、push の run が official の Dockerfile で組み直す
 
 - main がすでに 8.6.1 以上なら何もせずに成功する。そのとき 8.6.1 の PR が開いていれば閉じて枝を消す（Renovate に先を越された夜の PR）
@@ -155,10 +164,9 @@ Issue は push・復旧と夜のジョブで分ける。
   （同じ版の PR があるか main がすでにその版なら何もしない）
 - 夜の PR のチェックが一時的に落ちた（php.net の取得失敗など）ときは、dispatch し直しても PR のチェックは走り直さない。
   PR のチェックを手で再実行するか、PR を閉じてから同じ版で dispatch し直す
-- push の run は、その commit が main の先端なら Re-run all jobs で直せる。main が先へ進んでいれば、再実行は失敗するので、
-  版を指定しない workflow_dispatch を main の先端で走らせる。push の差分の基準は「最後に成功した push run」なので、
-  失敗した変更は次の push の run にも含まれる
-- artifact は JSON が 7 日、FrankenPHP の OCI アーカイブが 3 日で消える。それより古い run は再実行できない
+- push の run は Re-run せず、版を指定しない workflow_dispatch を main で走らせて直す（再実行した run は公開せずに失敗する）。
+  push の差分の基準は「最後に成功した push run」なので、失敗した変更は次の push の run にも含まれる
+- artifact は JSON が 7 日、FrankenPHP の OCI アーカイブが 3 日で消える
 
 ### 全部ビルドし直す
 
@@ -174,7 +182,9 @@ packages: write を持つジョブ（php-build・php-publish・frankenphp-push�
 
 夜のジョブには次が要る（デプロイブランチを main に限った environment `version-bump` を、bump ジョブが使う）。
 
-- GitHub App（php-images だけにインストール。権限は Contents: write、Pull requests: write、Metadata: read）
+- GitHub App（php-images だけにインストール。権限は Contents: write、Pull requests: write、Metadata: read）。
+  bump は App のトークンで PR の state・mergeable・autoMergeRequest・isInMergeQueue だけを読む（Checks / Commit statuses の
+  権限が要る statusCheckRollup は、GITHUB_TOKEN で見届ける watch-bump だけが読む）
 - repository variable `VERSION_BUMP_APP_CLIENT_ID`: App の Client ID（空ならトークンを作る前に止まる）
 - environment `version-bump` の secret `VERSION_BUMP_APP_PRIVATE_KEY`: App の秘密鍵
 - リポジトリの「Allow auto-merge」と、main の ruleset のマージキュー（PR の auto-merge がキューに入るため）
@@ -211,7 +221,7 @@ AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua exec -- zizmor --persona pedantic .
 ```
 
 - アクションは完全な commit SHA で pin する。`.github/workflows/actions.lock` は `gh actions-lock --no-narrow` で作り直す。
-  SHA のまま残るのはリポジトリの Actions の設定 `sha_pinning_required` が有効だからで、無効だと gh actions-lock は SHA をタグ参照に置き換える
+  SHA の固定は、Actions の設定 `sha_pinning_required` と CI の actions.lock の verify で守られる
 - Renovate は、PR の CI で実行されない action（login・upload/download-artifact・attest・create-github-app-token）を手動マージにしている
   （公開権限や App の鍵を持つ main の run で初めて動くため）
 - aqua のツールの版を変えたら、その設定ごとに `AQUA_CONFIG=<設定> aqua update-checksum --prune` で checksum を作り直す。
