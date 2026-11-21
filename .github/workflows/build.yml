@@ -750,7 +750,11 @@ jobs:
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           CREATED="$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)"
           export SOURCE_DATE_EPOCH CREATED
+          # bake は作業ディレクトリ（frankenphp/）の外へ書き出すのに許可（--allow fs.write）を求める。許可は出力先の
+          # ディレクトリに絞るので、そのディレクトリは先に作っておく。
+          mkdir -p "${RUNNER_TEMP}/oci"
           docker buildx bake "${TARGET}" \
+            --allow "fs.write=${RUNNER_TEMP}/oci" \
             --pull \
             --set "${TARGET}.contexts.php-base=docker-image://${PHP_IMAGE}@${PHP_DIGEST}" \
             "${pin_args[@]}" \
