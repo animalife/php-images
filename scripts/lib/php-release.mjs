@@ -12,7 +12,7 @@ export function releaseUrl(version) {
 export function parseRelease(json, version) {
   if (json === null || typeof json !== 'object') throw new Error('php.net の応答が JSON オブジェクトではない');
   if ('error' in json) return null;
-  if (json.version !== version) return null;
+  if (json.version !== version) throw new Error(`php.net の応答の version が ${version} ではない: ${json.version}`);
   if (!Array.isArray(json.source)) throw new Error('php.net の応答に source の配列が無い');
   return { version: json.version, source: json.source };
 }

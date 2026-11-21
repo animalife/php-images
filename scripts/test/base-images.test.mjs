@@ -86,3 +86,10 @@ test('すでに digest で固定された参照はそのまま通す', () => {
   const out = pinBaseImages({ dockerfile: `FROM debian@${d('4')}\n`, pins: {} });
   assert.deepEqual(out, { contexts: {}, syntax: null });
 });
+
+// BuildKit はパーサディレクティブ以外のコメントを読んだ時点でディレクティブを探すのをやめる。
+// 普通のコメントの後ろの # syntax= を拾うと、上流が使っていないフロントエンドを強制してしまう。
+test('普通のコメントの後ろの # syntax= はディレクティブとして扱わない', () => {
+  assert.equal(dockerfileRefs('# hello\n# syntax=docker/dockerfile:1.4\nFROM scratch\n').syntax, null);
+  assert.equal(dockerfileRefs('# check=error=true\n# syntax=docker/dockerfile:1\nFROM scratch\n').syntax, 'docker/dockerfile:1');
+});

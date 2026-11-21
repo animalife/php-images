@@ -68,6 +68,67 @@ jobs:
           node scripts/plan.mjs
           node scripts/verify-frankenphp-pin.mjs
 
+  # 上流の Dockerfile と bake の定義が、versions.json の baseImages に無い親イメージを参照していないかを
+  # build.yml と同じ手順で確かめる。FrankenPHP の更新で上流が GO_VERSION を上げた場合などを、マージ前に止める。
+  check-base-images:
+    name: check base images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Read FrankenPHP pin
+        id: fp
+        run: echo "commit=$(jq -r .frankenphp.commit versions.json)" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout php/frankenphp
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: php/frankenphp
+          ref: ${{ steps.fp.outputs.commit }}
+          path: frankenphp
+          persist-credentials: false
+
+      - name: Check php and FrankenPHP
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/docker-library/official-images/contents/library/php \
+            -H 'Accept: application/vnd.github.raw+json' > "${RUNNER_TEMP}/library-php"
+          out="${RUNNER_TEMP}/out"
+          for minor in $(jq -r '.php | keys[]' versions.json); do
+            tag="$(jq -r --arg m "${minor}" '.php[$m].officialTag' versions.json)"
+            os="$(jq -r --arg m "${minor}" '.php[$m].os' versions.json)"
+            echo "::group::php ${minor}（${tag}）"
+            : > "${out}"
+            GITHUB_OUTPUT="${out}" LIBRARY_FILE="${RUNNER_TEMP}/library-php" OFFICIAL_TAG="${tag}" node scripts/resolve-official.mjs
+            commit="$(sed -n 's/^gitCommit=//p' "${out}")"
+            directory="$(sed -n 's/^directory=//p' "${out}")"
+            src="${RUNNER_TEMP}/php-${minor}"
+            git init -q "${src}"
+            git -C "${src}" fetch -q --depth 1 https://github.com/docker-library/php.git "${commit}"
+            git -C "${src}" checkout -q FETCH_HEAD -- "${directory}/Dockerfile"
+            GITHUB_OUTPUT=/dev/null KIND=php DOCKERFILE="${src}/${directory}/Dockerfile" node scripts/pin-base-images.mjs
+            echo "::endgroup::"
+            echo "::group::frankenphp ${minor}"
+            target="runner-php-${minor//./-}-${os}"
+            (cd frankenphp && PHP_VERSION="${minor}" SHA='' docker buildx bake --print "${target}") > "${RUNNER_TEMP}/bake.json"
+            (cd frankenphp && GITHUB_OUTPUT=/dev/null KIND=frankenphp BAKE_FILE="${RUNNER_TEMP}/bake.json" TARGET="${target}" \
+              EXPECTED_PHP_BASE="docker-image://php:${tag}" VERSIONS_FILE="${GITHUB_WORKSPACE}/versions.json" \
+              node ../scripts/pin-base-images.mjs)
+            echo "::endgroup::"
+          done
+
   renovate-config:
     name: renovate-config-validator
     runs-on: ubuntu-24.04
@@ -123,7 +184,7 @@ jobs:
 
   gate:
     name: CI Gate
-    needs: [lint-workflows, test-scripts, renovate-config, verify-actions-lock]
+    needs: [lint-workflows, test-scripts, check-base-images, renovate-config, verify-actions-lock]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -1,6 +1,5 @@
 # aqua - Declarative CLI Version Manager
 # https://aquaproj.github.io/
-# CI で使う CLI ツールをバージョン固定・checksum 検証付きで入れる。
 # 版を変えたら `AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune` で aqua-checksums.json を作り直す
 # （-a はグローバル設定のパッケージまで書き込むので付けない）
 # （require_checksum のため、checksum が無い版は CI で入らない）。

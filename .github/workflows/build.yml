@@ -112,9 +112,9 @@ jobs:
           DEADLINE_SECONDS: '20700'
         run: node scripts/wait-php-release.mjs
 
-      # 待つ間に Renovate が FrankenPHP の pin を進めていたら、公開時点の main の pin でビルドする。
-      # dispatch 時点の pin のまま作ると、先に移動タグを取った新しい FrankenPHP と食い違い、パッチが移動タグに乗らない。
-      - name: Re-read the FrankenPHP pin from main
+      # 待つ間に Renovate が pin（FrankenPHP・親イメージ）を進めていたら、公開時点の main の versions.json でビルドする。
+      # dispatch 時点の pin のまま作ると、先に移動タグを取った新しいビルドと食い違うか、親イメージの更新を巻き戻す。
+      - name: Re-read pins from main
         id: pin
         if: ${{ steps.wait.outputs.found == 'true' }}
         env:
@@ -125,6 +125,15 @@ jobs:
           git show FETCH_HEAD:versions.json > "${VERSIONS_FILE}"
           node scripts/verify-frankenphp-pin.mjs
 
+      - name: Upload versions snapshot
+        if: ${{ steps.wait.outputs.found == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: versions-snapshot
+          path: ${{ runner.temp }}/main-versions.json
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Upload release info
         if: ${{ steps.wait.outputs.found == 'true' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -134,7 +143,7 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # 版ごとに 1 回だけ上流の Dockerfile を取得・差し替えし、両アーキに同じコンテキストを配る。
+  # 両アーキを同じ Dockerfile でビルドするため、取得と差し替えは版ごとに 1 回だけ行い、コンテキストを配る。
   php-prepare:
     name: Prepare php ${{ matrix.version }}
     needs: [plan, wait]
@@ -163,6 +172,13 @@ jobs:
         with:
           name: php-release
           path: ${{ runner.temp }}/release
+
+      - name: Download versions snapshot
+        if: ${{ needs.wait.outputs.found == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: versions-snapshot
+          path: ${{ runner.temp }}/snapshot
 
       # raw.githubusercontent.com は使わない。cache-control: max-age=300 で最大 5 分古い内容が返る
       # （2026-11-21、curl -sI https://raw.githubusercontent.com/docker-library/official-images/HEAD/library/php で確認）。
@@ -197,16 +213,16 @@ jobs:
           RELEASE_FILE: ${{ needs.wait.outputs.found == 'true' && format('{0}/release/php-release.json', runner.temp) || '' }}
         run: node scripts/rewrite-php-dockerfile.mjs
 
-      # 上流の Dockerfile はタグで親イメージ（FROM debian:trixie-slim など）を参照する。書き換えずに、
-      # versions.json の baseImages.php の digest を名前付きコンテキストで差し込む。pin の無い親を参照していたら止める。
       - name: Pin base images
         id: pin
         env:
           KIND: php
           DOCKERFILE: upstream/${{ steps.resolve.outputs.directory }}/Dockerfile
+          VERSIONS_FILE: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/main-versions.json', runner.temp) || '' }}
         run: node scripts/pin-base-images.mjs
 
-      # upload-artifact はファイルモードを保たないので、docker-php-* の実行ビットごと tar に固める。
+      # ディレクトリをそのまま upload しない。upload-artifact はファイルモードを保たず、docker-php-* の実行ビットが落ちる
+      # （actions/upload-artifact の README の Permission Loss 節）。
       - name: Pack build context
         env:
           DIRECTORY: upstream/${{ steps.resolve.outputs.directory }}
@@ -258,7 +274,10 @@ jobs:
           name: php-context-${{ matrix.version }}
           path: ${{ runner.temp }}/php-context
 
+      # 既定の moby/buildkit:buildx-stable-1 はタグ参照で、push-by-digest では GHCR の認証情報を受け取る。digest で固定する。
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
 
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -483,13 +502,23 @@ jobs:
           path: frankenphp
           persist-credentials: false
 
+      - name: Download versions snapshot
+        if: ${{ needs.wait.outputs.found == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: versions-snapshot
+          path: ${{ runner.temp }}/snapshot
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: php-digest-${{ matrix.version }}
           path: ${{ runner.temp }}/php-digest
           merge-multiple: true
 
+      # 既定の moby/buildkit:buildx-stable-1 はタグ参照で、push-by-digest では GHCR の認証情報を受け取る。digest で固定する。
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
 
       - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
@@ -525,9 +554,6 @@ jobs:
           fi
           echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
 
-      # 上流の bake 定義を読み、php-base が versions.json の追うタグと一致するかを確かめたうえで、
-      # golang-base など他の docker-image コンテキストと # syntax= を baseImages.frankenphp の digest に差し替える
-      # 引数を作る。pin の無い親を参照していたら止める（上流が親イメージを変えたときに固定が黙って外れないように）。
       - name: Pin base images
         id: bake
         env:
@@ -536,16 +562,16 @@ jobs:
           OFFICIAL_TAG: ${{ matrix.officialTag }}
           KIND: frankenphp
           BAKE_FILE: ${{ runner.temp }}/bake.json
+          SNAPSHOT: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/main-versions.json', runner.temp) || '' }}
         run: |
           set -euo pipefail
           target="runner-php-${MINOR//./-}-${OS}"
+          versions_file="${SNAPSHOT:-${PWD}/versions.json}"
           (cd frankenphp && PHP_VERSION="${MINOR}" SHA='' docker buildx bake --print "${target}") > "${BAKE_FILE}"
           (cd frankenphp && TARGET="${target}" EXPECTED_PHP_BASE="docker-image://php:${OFFICIAL_TAG}" \
-            VERSIONS_FILE=../versions.json node ../scripts/pin-base-images.mjs)
+            VERSIONS_FILE="${versions_file}" node ../scripts/pin-base-images.mjs)
           echo "target=${target}" >> "${GITHUB_OUTPUT}"
 
-      # 上流の docker-bake.hcl をそのまま使い、php-base を自前の php に、他の親イメージを pin した digest に差し替える。
-      # args、labels、secret は上流の定義に従う。
       - name: Build OCI archive
         env:
           TARGET: ${{ steps.bake.outputs.target }}
@@ -563,7 +589,6 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t pin_args < <(jq -r '.[]' <<< "${PIN_ARGS}")
-          # created と layer の時刻を FrankenPHP の commit 日時に揃える。
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
           CREATED="$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)"
           export SOURCE_DATE_EPOCH CREATED
@@ -620,8 +645,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # タグを付けずに digest だけで push する。--preserve-digests でビルドした manifest をそのまま送り、
-      # digest が変わるなら（再圧縮などが要るなら）失敗させる。
+      # --preserve-digests: 送る途中で manifest が変わる（再圧縮など）なら、別の digest で push せずに失敗させる。
       - name: Push by digest
         env:
           SLUG: ${{ matrix.slug }}

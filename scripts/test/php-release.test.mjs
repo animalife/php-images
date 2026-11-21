@@ -17,8 +17,11 @@ test('未公開の版（error を返す）は null', () => {
   assert.equal(parseRelease(fixture('php-release-unknown.json'), '8.6.1'), null);
 });
 
-test('応答の version が求めた版と違えば null', () => {
-  assert.equal(parseRelease(fixture('php-release-8.6.0.json'), '8.6.1'), null);
+// 版を指定した問い合わせなので、error でも求めた版でもない応答は形式の変化。未公開と取り違えると、
+// 待機が期限まで「未公開」を続けて緑で終わる。
+test('error が無く version が求めた版でない応答は例外にする', () => {
+  assert.throws(() => parseRelease(fixture('php-release-8.6.0.json'), '8.6.1'), /version/);
+  assert.throws(() => parseRelease({ source: [] }, '8.6.1'), /version/);
 });
 
 test('source が配列でなければ例外にする（形式の変化を未公開と取り違えない）', () => {

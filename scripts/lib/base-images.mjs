@@ -1,6 +1,6 @@
 // 上流の Dockerfile は書き換えず、名前付きコンテキスト（--build-context / bake の contexts）で FROM を置き換える。
 
-const SYNTAX_RE = /^#\s*syntax\s*=\s*(\S+)\s*$/i;
+const DIRECTIVE_RE = /^#\s*([A-Za-z]+)\s*=\s*(\S+)\s*$/;
 const DIGEST_RE = /@sha256:[0-9a-f]{64}$/;
 
 export function dockerfileRefs(text) {
@@ -12,10 +12,12 @@ export function dockerfileRefs(text) {
     if (!refs.includes(ref)) refs.push(ref);
   };
   const lines = text.split('\n');
-  for (const [i, line] of lines.entries()) {
-    const s = SYNTAX_RE.exec(line);
-    // パーサディレクティブは先頭のコメント行の中にだけ書ける。
-    if (s && lines.slice(0, i).every((l) => l.startsWith('#'))) syntax = s[1];
+  for (const line of lines) {
+    const d = DIRECTIVE_RE.exec(line);
+    if (!d) break;
+    if (d[1].toLowerCase() === 'syntax') syntax = d[2];
+  }
+  for (const line of lines) {
     const from = /^FROM\s+(.*)$/i.exec(line.trim());
     if (from) {
       const words = from[1].split(/\s+/).filter((w) => !w.startsWith('--'));

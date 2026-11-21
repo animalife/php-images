@@ -45,6 +45,17 @@
             datasourceTemplate: 'docker',
         },
         {
+            description: 'build.yml の setup-buildx-action に渡す BuildKit のイメージ（tag と digest）',
+            customType: 'regex',
+            managerFilePatterns: [
+                '/^\\.github/workflows/build\\.yml$/',
+            ],
+            matchStrings: [
+                'image=(?<depName>moby/buildkit):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[0-9a-f]{64})',
+            ],
+            datasourceTemplate: 'docker',
+        },
+        {
             description: 'versions.json の frankenphp: 上流のタグと commit を二重に固定する。新しいタグが出ると版と commit を同時に更新する',
             customType: 'regex',
             managerFilePatterns: [
@@ -154,6 +165,21 @@
             ],
             matchUpdateTypes: [
                 'patch',
+            ],
+            automerge: true,
+        },
+        {
+            description: 'BuildKit は GitHub Actions と同じく平日の朝・3 日冷却で、minor 以下と digest を自動マージする',
+            matchPackageNames: [
+                'moby/buildkit',
+            ],
+            schedule: [
+                'before 10am every weekday',
+            ],
+            matchUpdateTypes: [
+                'minor',
+                'patch',
+                'digest',
             ],
             automerge: true,
         },

@@ -99,4 +99,4 @@ zizmor --persona pedantic .
 
 - アクションは完全な commit SHA で pin する。`.github/workflows/actions.lock` は `gh actions-lock --no-narrow` で作り直す
 - aqua のツールの版を変えたら `AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune` で checksum を作り直す
-- PR では `.github/workflows/ci.yml` が lint・テスト・Renovate 設定の検証・actions.lock の検証を行い、`CI Gate` に集約する
+- PR では `.github/workflows/ci.yml` が lint・テスト・親イメージの pin の検査・Renovate 設定の検証・actions.lock の検証を行い、`CI Gate` に集約する
