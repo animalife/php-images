@@ -191,11 +191,15 @@ jobs:
             fi
             fp_version="$(jq -er .frankenphp.version versions.json)"
             fp_commit="$(jq -er .frankenphp.commit versions.json)"
-            # build.yml の Build OCI archive と同じ差し替え（php-base はこの job の php、出力は捨てる）。
-            # bake は作業ディレクトリの外のファイルを読むのに許可（--allow fs.read）を求める。
+            # build.yml の Build OCI archive と同じ差し替えと出力の形（作業ディレクトリの外へ OCI アーカイブを書き出す）にする。
+            # 出力を捨てる形だと、bake が書き出しに求める許可（--allow fs.write）を CI で通らない。php-base はこの job の php。
+            # bake は作業ディレクトリの外のファイルを読み書きするのに許可（fs.read / fs.write）を求める。
+            fp_oci="${RUNNER_TEMP}/fp-oci-${minor}"
+            mkdir -p "${fp_oci}"
             (cd frankenphp && PHP_VERSION="${minor}" VERSION="${fp_version}" SHA="${fp_commit}" LATEST=false \
               docker buildx bake "${target}" \
                 --allow "fs.read=${php_oci}" \
+                --allow "fs.write=${fp_oci}" \
                 --set "${target}.contexts.php-base=oci-layout://${php_oci}:smoke" \
                 "${fp_pin_args[@]}" \
                 --set "${target}.platform=linux/amd64" \
@@ -205,8 +209,9 @@ jobs:
                 --set "${target}.labels.org.opencontainers.image.revision=${GITHUB_SHA}" \
                 --set "${target}.labels.dev.animalife.php-images.frankenphp.revision=${fp_commit}" \
                 --set "${target}.labels.dev.animalife.php-images.php-base=smoke" \
-                --set "${target}.output=type=cacheonly")
-            rm -rf "${php_oci}"
+                --set "${target}.output=type=oci,dest=${fp_oci}/image.tar,oci-mediatypes=true,rewrite-timestamp=true" \
+                --metadata-file "${fp_oci}/metadata.json")
+            rm -rf "${php_oci}" "${fp_oci}"
             echo "::endgroup::"
           done
 
