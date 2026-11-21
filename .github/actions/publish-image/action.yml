@@ -48,6 +48,10 @@ runs:
         STAGING_TAG: ${{ inputs.staging-tag }}
       run: |
         set -euo pipefail
+        if ! [[ "${EXPECTED}" =~ ^[1-9][0-9]*$ ]]; then
+          echo "::error::expected-count が正の整数ではない: '${EXPECTED}'"
+          exit 1
+        fi
         mapfile -t digests < <(cat "${DIGESTS_DIR}"/*)
         if [ "${#digests[@]}" -ne "${EXPECTED}" ]; then
           echo "::error::検査済みの digest が ${EXPECTED} 個ではない（${#digests[@]} 個）"
@@ -77,13 +81,18 @@ runs:
         subject-digest: ${{ steps.index.outputs.digest }}
         push-to-registry: true
 
-    # pin の古さは、この run の versions.json（checkout したもの）と main の先端のものを比べて決める。
-    - name: Fetch versions.json on main
+    # 古さは、この run の versions.json（checkout したもの）と main の先端のもの、および
+    # この run の commit から main の先端までに変わったファイル（ビルドの入力に当たるか）で決める。
+    - name: Fetch versions.json on main and the changed files
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         git fetch --depth 1 origin main
         git show FETCH_HEAD:versions.json > "${RUNNER_TEMP}/main-versions.json"
+        gh api --paginate "repos/${GITHUB_REPOSITORY}/compare/${GITHUB_SHA}...$(git rev-parse FETCH_HEAD)" \
+          --jq '.files[]?.filename' > "${RUNNER_TEMP}/changed-files"
 
     - name: Decide tags
       id: tags
@@ -96,6 +105,7 @@ runs:
         RUN_ATTEMPT: ${{ github.run_attempt }}
         RUN_VERSIONS_FILE: versions.json
         MAIN_VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
+        CHANGED_FILES_FILE: ${{ runner.temp }}/changed-files
       run: node scripts/publish-tags.mjs
 
     - name: Tag

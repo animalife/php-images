@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pinsStale, decidePublish, tagsToApply, choosePhpBase } from '../lib/publish.mjs';
+import { pinsStale, decidePublish, tagsToApply, planFrankenphp, assessPr } from '../lib/publish.mjs';
 
 const digest = (c) => `sha256:${c.repeat(64)}`;
 const versions = () => ({
@@ -36,12 +36,13 @@ test('FrankenPHP の pin や別の版の更新では php は古くならない',
   assert.equal(pinsStale(versions(), main, 'php', '8.6'), false);
 });
 
-// officialDigest はビルドのきっかけで、Dockerfile はビルド時点の library/php から取るので内容の入力ではない。
-test('officialDigest の更新（null から埋まる場合を含む）では古くならない', () => {
+// 事件: officialDigest を比べていなかったので、古い run の再実行が、digest の更新で組み直した新しい run の中身を
+// 古いアーカイブで上書きできた。
+test('officialDigest の更新でも古くなる（null から埋まる場合を含む）', () => {
   const run = versions();
   run.php['8.6'].officialDigest = null;
-  assert.equal(pinsStale(run, versions(), 'php', '8.6'), false);
-  assert.equal(pinsStale(run, versions(), 'frankenphp', '8.6'), false);
+  assert.equal(pinsStale(run, versions(), 'php', '8.6'), true);
+  assert.equal(pinsStale(run, versions(), 'frankenphp', '8.6'), true);
 });
 
 test('FrankenPHP の古さは FrankenPHP の pin と両方の baseImages と php の pin で決まる', () => {
@@ -87,16 +88,38 @@ test('付けるタグは判定で決まる', () => {
 });
 
 const record = (decision) => ({ decision, digest: digest('a'), phpVersion: '8.6.1' });
+const pub = (version) => ({ version, phpVersion: `${version}.1`, os: 'trixie', variant: 'cli', officialTag: `${version}.1-cli-trixie`, movingTag: `${version}-cli-trixie` });
 
-test('php を作らなかった版の FrankenPHP は移動タグの php の上に組む', () => {
-  assert.deepEqual(choosePhpBase({ built: false, record: null }), { source: 'moving' });
+test('planFrankenphp: php を作らなかった版は移動タグの php、作った版はその digest の上に組む', () => {
+  const out = planFrankenphp({ publishes: [pub('8.5'), pub('8.6')], phpVersions: ['8.6'], records: { '8.6': record('move') } });
+  assert.deepEqual(out.map((o) => [o.version, o.base.source]), [['8.5', 'moving'], ['8.6', 'own']]);
+  assert.equal(out[1].base.digest, digest('a'));
 });
 
-test('この run で php を作った版は、その digest の上に組む', () => {
-  assert.deepEqual(choosePhpBase({ built: true, record: record('move') }), { source: 'own', digest: digest('a'), phpVersion: '8.6.1' });
+// php を skip した版は main が先へ進んでいるので、FrankenPHP もその版は必ず古い。失敗にせず外す。
+test('planFrankenphp: php が skip になった版は FrankenPHP も外す（失敗にしない）', () => {
+  const out = planFrankenphp({ publishes: [pub('8.6')], phpVersions: ['8.6'], records: { '8.6': record('skip') } });
+  assert.deepEqual(out, []);
 });
 
-test('この run の php が公開されなかった・結果が無いなら失敗', () => {
-  assert.throws(() => choosePhpBase({ built: true, record: null }), /公開の結果/);
-  assert.throws(() => choosePhpBase({ built: true, record: record('skip') }), /公開されていない/);
+test('planFrankenphp: この run で php を作るはずだった版に公開の結果が無ければ失敗', () => {
+  assert.throws(() => planFrankenphp({ publishes: [pub('8.6')], phpVersions: ['8.6'], records: {} }), /公開の結果/);
+});
+
+const pr = (o) => ({ state: 'OPEN', mergeable: 'MERGEABLE', autoMergeRequest: {}, rollup: 'PENDING', ...o });
+
+test('assessPr: マージされれば merged、チェック中・キュー待ちは pending', () => {
+  assert.equal(assessPr(pr({ state: 'MERGED' })), 'merged');
+  assert.equal(assessPr(pr({})), 'pending');
+  assert.equal(assessPr(pr({ rollup: 'SUCCESS' })), 'pending');
+  assert.equal(assessPr(pr({ mergeable: 'UNKNOWN', rollup: null })), 'pending');
+});
+
+// 夜の PR が CI やキューで落ちても、App にしか通知が行かず誰も気付けなかったため、run を失敗させて人に届ける。
+test('assessPr: 閉じられた・conflict・チェックの失敗・auto-merge が外れたなら例外', () => {
+  assert.throws(() => assessPr(pr({ state: 'CLOSED' })), /閉じられた/);
+  assert.throws(() => assessPr(pr({ mergeable: 'CONFLICTING' })), /conflict/);
+  assert.throws(() => assessPr(pr({ rollup: 'FAILURE' })), /チェック/);
+  assert.throws(() => assessPr(pr({ rollup: 'ERROR' })), /チェック/);
+  assert.throws(() => assessPr(pr({ autoMergeRequest: null })), /auto-merge/);
 });

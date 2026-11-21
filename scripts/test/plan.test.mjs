@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateVersions, computePlan } from '../lib/plan.mjs';
+import { validateVersions, computePlan, buildInputsChanged } from '../lib/plan.mjs';
 
 const digest = (c) => `sha256:${c.repeat(64)}`;
 const base = () => ({
@@ -185,4 +185,20 @@ test('validateVersions は officialTag のパッチ版の形を検査する', ()
   const v = base();
   v.php['8.6'].officialDigest = '';
   assert.throws(() => validateVersions(v), /officialDigest/);
+});
+
+// 存在しないラベルを書くと、main の公開キューがランナー待ちで詰まる。
+test('validateVersions は platform とランナーの組を許可リストで検査する', () => {
+  const v = base();
+  v.platforms[0].runner = 'ubuntu-latest-xl';
+  assert.throws(() => validateVersions(v), /runner/);
+  const w = base();
+  w.platforms[1].runner = 'ubuntu-24.04';
+  assert.throws(() => validateVersions(w), /runner/);
+});
+
+test('buildInputsChanged はビルドの入力に当たるファイルだけを数える', () => {
+  assert.equal(buildInputsChanged(['README.md', 'versions.json', '.github/workflows/ci.yml']), false);
+  assert.equal(buildInputsChanged(['scripts/lib/publish.mjs']), true);
+  assert.equal(buildInputsChanged(['.github/workflows/build.yml']), true);
 });

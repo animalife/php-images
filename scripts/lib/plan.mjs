@@ -1,8 +1,9 @@
 import { assertStableVersion } from './php-release.mjs';
 import { minorOf } from './tags.mjs';
 
-// platform 名は artifact 名や slug に使うので、ネイティブランナーのある 2 つに限る。
-const PLATFORMS = new Set(['linux/amd64', 'linux/arm64']);
+// platform 名は artifact 名や slug に使うので、ネイティブランナーのある 2 つに限り、ランナーも組で固定する
+// （存在しないラベルを書くと、main の公開キューがランナー待ちで詰まる）。
+const RUNNERS = { 'linux/amd64': 'ubuntu-24.04', 'linux/arm64': 'ubuntu-24.04-arm' };
 
 function fail(msg) {
   throw new Error(`versions.json: ${msg}`);
@@ -11,8 +12,8 @@ function fail(msg) {
 export function validateVersions(v) {
   if (!Array.isArray(v?.platforms) || v.platforms.length === 0) fail('platforms が空');
   for (const p of v.platforms) {
-    if (!PLATFORMS.has(p.platform)) fail(`platform は ${[...PLATFORMS].join(' / ')} のどれか: ${p.platform}`);
-    if (typeof p.runner !== 'string' || p.runner === '') fail(`${p.platform} の runner が空`);
+    if (!(p.platform in RUNNERS)) fail(`platform は ${Object.keys(RUNNERS).join(' / ')} のどれか: ${p.platform}`);
+    if (p.runner !== RUNNERS[p.platform]) fail(`${p.platform} の runner は ${RUNNERS[p.platform]}: ${p.runner}`);
   }
   const fp = v.frankenphp ?? {};
   if (fp.repository !== 'php/frankenphp') fail(`frankenphp.repository が php/frankenphp ではない: ${fp.repository}`);
@@ -71,6 +72,10 @@ const BUILD_INPUTS = [
   /^tests\//,
 ];
 
+export function buildInputsChanged(files) {
+  return files.some((f) => BUILD_INPUTS.some((re) => re.test(f)));
+}
+
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const byVersion = (a, b) => a.localeCompare(b, 'en', { numeric: true });
 
@@ -102,7 +107,7 @@ export function computePlan({ event, before = null, after, changedFiles = null, 
       waitFor = phpVersion;
     }
   } else if (event === 'push') {
-    const inputsChanged = changedFiles === null || changedFiles.some((f) => BUILD_INPUTS.some((re) => re.test(f)));
+    const inputsChanged = changedFiles === null || buildInputsChanged(changedFiles);
     if (before === null || inputsChanged || !same(before.platforms, after.platforms)) {
       php = all;
       frankenphp = all;

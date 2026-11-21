@@ -24,3 +24,10 @@ export function bumpBranch(version) {
   assertStableVersion(version);
   return `php-version/${version}`;
 }
+
+// 夜のジョブが main と開いている PR を見て、次にすることを決める。
+export function bumpAction({ needed, openPr }) {
+  if (!needed) return openPr ? { kind: 'close', pr: openPr.number } : { kind: 'none' };
+  if (openPr) return { kind: 'watch', pr: openPr.number, enableAutoMerge: openPr.autoMergeRequest === null };
+  return { kind: 'create' };
+}

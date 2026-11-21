@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bumpVersions, formatVersions, bumpBranch } from '../lib/bump.mjs';
+import { bumpVersions, formatVersions, bumpBranch, bumpAction } from '../lib/bump.mjs';
 
 const repoVersions = () => JSON.parse(readFileSync(new URL('../../versions.json', import.meta.url), 'utf8'));
 
@@ -36,4 +36,21 @@ test('versions.json はリポジトリのファイルと同じ書式で書く（
 test('PR のブランチ名は版から決まる', () => {
   assert.equal(bumpBranch('8.6.1'), 'php-version/8.6.1');
   assert.throws(() => bumpBranch('8.6'), /版/);
+});
+
+const prState = (o) => ({ number: 7, autoMergeRequest: {}, ...o });
+
+test('bumpAction: main がすでにその版以上なら、残っている同じ版の PR を閉じる', () => {
+  assert.deepEqual(bumpAction({ needed: false, openPr: prState({}) }), { kind: 'close', pr: 7 });
+  assert.deepEqual(bumpAction({ needed: false, openPr: null }), { kind: 'none' });
+});
+
+// dispatch し直したとき、既存の PR の auto-merge が外れていれば有効にし直してから見届ける。
+test('bumpAction: 同じ版の PR があれば、auto-merge を確かめて見届けに回す', () => {
+  assert.deepEqual(bumpAction({ needed: true, openPr: prState({}) }), { kind: 'watch', pr: 7, enableAutoMerge: false });
+  assert.deepEqual(bumpAction({ needed: true, openPr: prState({ autoMergeRequest: null }) }), { kind: 'watch', pr: 7, enableAutoMerge: true });
+});
+
+test('bumpAction: PR が無ければ作る', () => {
+  assert.deepEqual(bumpAction({ needed: true, openPr: null }), { kind: 'create' });
 });

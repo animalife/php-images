@@ -4,10 +4,9 @@ function stable(value) {
   return Object.fromEntries(Object.keys(value).sort().map((k) => [k, stable(value[k])]));
 }
 
-// officialDigest はビルドのきっかけで、Dockerfile はビルド時点の library/php から取るので内容の入力ではない。
+// officialDigest も比べる。digest の更新で組み直した run の中身を、古い run の再実行が上書きしないように。
 function relevantPins(versions, kind, minor) {
-  const { officialDigest, ...entry } = versions.php?.[minor] ?? {};
-  const php = { phpBase: versions.baseImages?.php ?? null, php: entry };
+  const php = { phpBase: versions.baseImages?.php ?? null, php: versions.php?.[minor] ?? null };
   if (kind === 'php') return php;
   return { ...php, frankenphpBase: versions.baseImages?.frankenphp ?? null, frankenphp: versions.frankenphp ?? null };
 }
@@ -35,10 +34,25 @@ export function tagsToApply(decision, image, { fixed, moving }) {
   throw new Error(`判定が不正: ${decision}`);
 }
 
-// FrankenPHP の php-base: この run で php をビルドした版はその digest、しなかった版は移動タグの php。
-export function choosePhpBase({ built, record }) {
-  if (!built) return { source: 'moving' };
-  if (record === null) throw new Error('この run で php をビルドするはずだったが、公開の結果が無い');
-  if (record.decision !== 'move') throw new Error(`この run の php は公開されていない（${record.decision}）`);
-  return { source: 'own', digest: record.digest, phpVersion: record.phpVersion };
+// FrankenPHP をどの php の上に組むか、版ごとに決める。この run で php を作った版はその digest、作らなかった版は
+// 移動タグの php。php を skip した版は main が先へ進んでいる（FrankenPHP も必ず古い）ので外す。
+export function planFrankenphp({ publishes, phpVersions, records }) {
+  return publishes.flatMap((p) => {
+    if (!phpVersions.includes(p.version)) return [{ ...p, base: { source: 'moving' } }];
+    const record = records[p.version] ?? null;
+    if (record === null) throw new Error(`この run で php ${p.version} をビルドするはずだったが、公開の結果が無い`);
+    if (record.decision === 'skip') return [];
+    if (record.decision !== 'move') throw new Error(`php ${p.version} の公開の判定が不正: ${record.decision}`);
+    return [{ ...p, base: { source: 'own', digest: record.digest, phpVersion: record.phpVersion } }];
+  });
+}
+
+// 夜の PR の状態。rollup は statusCheckRollup.state（チェックが無ければ null）。
+export function assessPr({ state, mergeable, autoMergeRequest, rollup }) {
+  if (state === 'MERGED') return 'merged';
+  if (state === 'CLOSED') throw new Error('PR がマージされずに閉じられた');
+  if (mergeable === 'CONFLICTING') throw new Error('PR が main と conflict している');
+  if (rollup === 'FAILURE' || rollup === 'ERROR') throw new Error('PR のチェックが失敗した');
+  if (autoMergeRequest === null) throw new Error('PR の auto-merge が外れた（マージキューから外されたなど）');
+  return 'pending';
 }

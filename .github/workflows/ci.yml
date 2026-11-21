@@ -74,8 +74,10 @@ jobs:
 
   # 上流の Dockerfile と bake の定義が、versions.json の baseImages に無い親イメージを参照していないかを
   # build.yml と同じ手順で確かめる。FrankenPHP の更新で上流が GO_VERSION を上げた場合などを、マージ前に止める。
-  # あわせて php を amd64 で push せずにビルドする（action や BuildKit の更新が、公開権限を持つ main の run で
-  # 初めて動くことにならないように）。必須チェックと食い違わないよう paths では絞らない。
+  # あわせて php を amd64 で push せずにビルドする（BuildKit・setup-buildx・checkout・setup-node の更新と、
+  # Dockerfile の取得と差し替えを、公開権限を持つ main の run より前に通す）。login・artifact・attest・
+  # create-github-app-token など main の run でしか動かない action はここでは通らないので、Renovate で手動マージにしている。
+  # 必須チェックと食い違わないよう paths では絞らない。
   check-base-images:
     name: check base images and smoke build php
     runs-on: ubuntu-24.04
@@ -149,6 +151,10 @@ jobs:
             GITHUB_OUTPUT="${out}" KIND=php DOCKERFILE="${src}/${directory}/Dockerfile" node scripts/pin-base-images.mjs
             pin_json="$(sed -n 's/^args=//p' "${out}")"
             pin_count="$(sed -n 's/^count=//p' "${out}")"
+            if ! [[ "${pin_count}" =~ ^[0-9]+$ ]]; then
+              echo "::error::pin の数が数値ではない: '${pin_count}'"
+              exit 1
+            fi
             mapfile -t pin_args < <(jq -r '.[]' <<< "${pin_json}")
             if [ "${#pin_args[@]}" -ne "${pin_count}" ]; then
               echo "::error::親イメージの pin の引数が ${#pin_args[@]} 個で、${pin_count} 個ではない"
@@ -214,8 +220,12 @@ jobs:
           fi
           gh extension install github/gh-actions-lock --pin "${GH_ACTIONS_LOCK_VERSION}"
 
-      # lockfile の再生成は `gh actions-lock --no-narrow` で行う（--no-narrow を外すと
-      # SHA pin の uses: がタグ参照に書き換えられ、zizmor の unpinned-uses で落ちる）。
+      # lockfile の再生成は `gh actions-lock --no-narrow` で行う（Renovate と同じフラグ。--no-narrow は v4 のような
+      # 浮動の ref を v4.2.1 に絞らないだけ）。uses: の完全な SHA が残るのは、このリポジトリで Actions の設定
+      # sha_pinning_required が有効だからで、無効だと gh actions-lock は SHA をタグ参照に置き換え、zizmor の
+      # unpinned-uses で落ちる（2026-11-21、gh-actions-lock v0.4.1。remote の無い複製では --no-narrow 付きでも置き換わり、
+      # remote を animalife/php-images にすると置き換わらないことを確認。設定は
+      # gh api repos/animalife/php-images/actions/permissions --jq .sha_pinning_required で読める）。
       - name: Verify actions.lock
         env:
           GH_TOKEN: ${{ github.token }}

@@ -25,8 +25,12 @@ php.net での公開からそのままパッチ入りのイメージを作るた
   ```
 
   attestation はマルチアーキの index の digest にだけ付く。アーキごとの manifest の digest を渡すと verify は失敗する。
-  公開を main の run に限る本当の境界はこの検証（`--source-ref refs/heads/main` と `--signer-workflow`）で、消費側はこれを必ず通す前提にする。
-  environment `ghcr-publish` は誤操作のガードで、書き込み権限者がブランチ上で外せば GHCR には書ける
+  消費側はこの検証（`--source-ref refs/heads/main` と `--signer-workflow`）を必ず通す前提にする。これで確かめられるのは
+  「main の build.yml が作った」ことまでで、main の中身は書き込み権限者（collaborator）を信頼している。PR のレビューは
+  必須にしていないので、書き込み権限者は PR で ci.yml や build.yml そのものを書き換えてマージできる。
+  environment `ghcr-publish` も誤操作のガードで、書き込み権限者がブランチ上で外せば GHCR には書ける。
+  将来レビューを必須にするなら、夜のジョブの App のトークン（pull-requests: write）が承認の抜け道にならないか（App が
+  PR を作り、同じ App や別の経路で承認できないか）を合わせて確かめる
 
 - 固定タグも、同じ版のまま作り直すと指す先が変わる。親イメージ（`baseImages`）や上流の Dockerfile の更新、
   ビルドの入力の変更で再ビルドすると、同じ `8.6.0-cli-trixie` / `1.14.0-php8.6.0-trixie` が新しい digest を指す。
@@ -34,8 +38,11 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 - 公開するのは main の push の run（と、復旧用の版を指定しない workflow_dispatch）だけ。ビルドする PHP の版は常に
   `versions.json` の pin で、run は commit 順に直列で走る（build.yml の concurrency）。
   - この run の `versions.json` と main の先端の `versions.json` が、そのイメージに関わる pin（php では `baseImages.php` と
-    その版の設定、FrankenPHP ではそれに `baseImages.frankenphp` と `frankenphp` を足したもの。`officialDigest` は除く）で
-    一致しなければ、タグを付けずに成功で終える（main の先の commit の run が組み直す）。再実行（Re-run）した run なら失敗にする。
+    その版の設定（`officialDigest` を含む）、FrankenPHP ではそれに `baseImages.frankenphp` と `frankenphp` を足したもの）で
+    一致しないか、この run の commit から main の先端までにビルドの入力（build.yml・composite action・scripts・tests・
+    `.github/aqua.yaml`・`.node-version`）が変わっていれば、タグを付けずに成功で終える（main の先の commit の run が組み直す）。
+    再実行（Re-run）した run なら失敗にする（古いアーカイブで新しい run の中身を上書きしないように）。
+    php をこの理由でタグなしにした版は、FrankenPHP もその版は組まない（失敗にはしない）。
     後続の run は main への push で起きることを前提にしている。`[skip ci]` などでワークフローが起きない push だと
     組み直されないので、そのときは版を指定しない workflow_dispatch で全部ビルドし直す
   - それ以外は、固定タグと移動タグを付ける（`scripts/lib/publish.mjs`）
@@ -61,7 +68,9 @@ php.net での公開からそのままパッチ入りのイメージを作るた
   上流の Dockerfile は書き換えず、名前付きコンテキスト（`--build-context` / bake の `contexts`）と `BUILDKIT_SYNTAX` で差し替える。
   取得した Dockerfile や bake の定義が pin の無いイメージを参照していたらビルドを止める（上流が親イメージを変えたら、ここに足して直す）。
   Renovate が digest だけを更新する
-- `platforms`: プラットフォームとランナー。ワークフローの `runs-on` と揃えて手で上げる（Renovate はランナーのメジャー更新を提案しない）
+- `platforms`: プラットフォームとランナー。組は `linux/amd64` = `ubuntu-24.04`、`linux/arm64` = `ubuntu-24.04-arm` だけを受け付ける
+  （存在しないラベルで公開のキューが詰まらないように）。上げるときは `scripts/lib/plan.mjs` の許可リストとワークフローの
+  `runs-on` も手で揃える（Renovate はランナーのメジャー更新を提案しない）
 
 ### digest 固定が及ばない入力
 
@@ -115,16 +124,23 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
 2. 公開されたら、その時点の main から `versions.json` の 8.6 を `8.6.1-cli-trixie`（`officialDigest` は `null`）に上げる PR を作り、
    auto-merge を有効にする（チェックが通ればマージキューに入る）。待っている間に main が進んでいても、PR は最新の main から作る
 3. 以降は普段の経路: PR の CI（php.net の情報で差し替えた Dockerfile の smoke build を含む）→ マージ → main の push の run が公開する
-4. 公式イメージが 8.6.1 を出すと、Renovate が `officialDigest` を埋める PR を作り、push の run が official の Dockerfile で組み直す
+4. この run は PR がマージされるまで見届ける（watch-bump）。2 時間以内にマージされない・PR が閉じられた・conflict になった・
+   チェックが失敗した・auto-merge が外れた（キューから外された）ときは run を失敗にする。App が作った PR の失敗は App にしか
+   通知されないので、dispatch した人に届けるため
+5. 公式イメージが 8.6.1 を出すと、Renovate が `officialDigest` を埋める PR を作り、push の run が official の Dockerfile で組み直す
 
-- main がすでに 8.6.1 以上なら、何もせずに成功する。同じ版の PR がすでに開いていても何もしない
+- main がすでに 8.6.1 以上なら何もせずに成功する。そのとき 8.6.1 の PR が開いていれば閉じて枝を消す（Renovate に先を越された夜の PR）
+- 同じ版の PR がすでに開いていれば、auto-merge が外れていないかを確かめ（外れていれば有効にし直す）、見届けに進む
+- 前回の失敗で枝だけが残っていれば、消してから作り直す（force での付け替えは、枝の ruleset で禁止されうるので使わない）
+- main の ruleset（必須チェックとマージキュー）が無いと auto-merge を有効にできず、その旨のエラーで失敗する。ruleset を入れてから使う
 - PR は専用の GitHub App のトークンで作る（GITHUB_TOKEN で作った PR では CI が起きないため）。コミットは署名が必須なので、
   git push ではなく GitHub が署名する API（createCommitOnBranch）で作る
 - 待機中も普段のビルドは止まらない（待つ run は版ごとに別の concurrency グループ）
 
 ### 失敗したとき
 
-main の run でどれかのジョブが失敗・取り消しになると、Issue「build ワークフローが main で失敗している」を作る（開いていればコメントを足す）。
+main の run（夜のジョブを含む）でどれかのジョブが失敗・取り消しになると、Issue「build ワークフローが main で失敗している」を作る
+（開いていればコメントを足す）。push か版を指定しない dispatch の run が成功すると、コメントを残して閉じる。
 
 - 夜のジョブ（版を指定した dispatch）は、同じ版を指定して dispatch し直す。PR を作る前に落ちていても、作った後でも、重ねて走らせて問題ない
   （同じ版の PR があるか main がすでにその版なら何もしない）
@@ -150,6 +166,8 @@ packages: write を持つジョブ（php-build・php-publish・frankenphp-push�
 - repository variable `VERSION_BUMP_APP_CLIENT_ID`: App の Client ID（空ならトークンを作る前に止まる）
 - environment `version-bump` の secret `VERSION_BUMP_APP_PRIVATE_KEY`: App の秘密鍵
 - リポジトリの「Allow auto-merge」と、main の ruleset のマージキュー（PR の auto-merge がキューに入るため）
+- App の権限で、auto-merge の有効化とマージキューへの投入ができるか（Contents / Pull requests の write で足りるか、
+  `merge_queues` の権限も要るか）は、初回の夜のジョブで確かめる
 
 初回の公開のあと、GHCR のパッケージ（`php-images/php` と `php-images/frankenphp`）は private で作られる。
 パッケージの Package settings → Danger Zone → Change visibility で public にする。消費側のリポジトリから読めることも確かめる。
@@ -177,7 +195,10 @@ AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua exec -- jactionlint --profile correct
 AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua exec -- zizmor --persona pedantic .
 ```
 
-- アクションは完全な commit SHA で pin する。`.github/workflows/actions.lock` は `gh actions-lock --no-narrow` で作り直す
+- アクションは完全な commit SHA で pin する。`.github/workflows/actions.lock` は `gh actions-lock --no-narrow` で作り直す。
+  SHA のまま残るのはリポジトリの Actions の設定 `sha_pinning_required` が有効だからで、無効だと gh actions-lock は SHA をタグ参照に置き換える
+- Renovate は、PR の CI で実行されない action（login・upload/download-artifact・attest・create-github-app-token）を手動マージにしている
+  （公開権限や App の鍵を持つ main の run で初めて動くため）
 - aqua のツールの版を変えたら、その設定ごとに `AQUA_CONFIG=<設定> aqua update-checksum --prune` で checksum を作り直す。
   `.github/aqua.yaml` はビルドの入力（変えると全版を作り直す）、`.github/aqua-ci/aqua.yaml` は CI だけで使う
 - PR とマージキューでは `.github/workflows/ci.yml` が lint・テスト・親イメージの pin の検査・php の amd64 のビルド（push しない）・

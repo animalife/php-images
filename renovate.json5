@@ -137,6 +137,21 @@
             automerge: true,
         },
         {
+            description: 'PR の CI では実行されず、公開権限や App の鍵を持つ main の run で初めて動く action は、build inputs のグループから分けて手動マージにする',
+            matchManagers: [
+                'github-actions',
+            ],
+            matchPackageNames: [
+                'docker/login-action',
+                'actions/upload-artifact',
+                'actions/download-artifact',
+                'actions/attest',
+                'actions/create-github-app-token',
+            ],
+            groupName: 'publish actions',
+            automerge: false,
+        },
+        {
             description: 'versions.json の docker イメージは、php のパッチ版の更新（8.6.0 → 8.6.1）と digest の更新だけを提案させる。minor 以上（php の 8.7）や親イメージのタグの更新（golang の 1.28 など）は提案させない。上流が親イメージのタグを変えたらビルドが止まるので、そのとき手で直す',
             matchFileNames: [
                 'versions.json',
