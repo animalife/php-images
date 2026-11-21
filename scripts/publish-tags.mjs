@@ -1,32 +1,31 @@
-import { execFileSync } from 'node:child_process';
-import { canMoveTag, currentFromImage, frankenphpTags, phpTags } from './lib/tags.mjs';
+import { readFileSync } from 'node:fs';
+import { decidePublish, pinsStale, tagsToApply } from './lib/publish.mjs';
+import { inspectImage } from './lib/registry.mjs';
+import { currentFromImage, frankenphpTags, phpTags } from './lib/tags.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';
 
-function inspect(ref, keys) {
-  let out;
-  try {
-    out = execFileSync('docker', ['buildx', 'imagetools', 'inspect', ref, '--format', '{{json .Image}}'], {
-      encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
-    });
-  } catch (e) {
-    if (/: not found\s*$/m.test(String(e.stderr))) return null;
-    throw new Error(`${ref} を読めない: ${e.stderr}`);
-  }
-  return currentFromImage(JSON.parse(out), keys);
+const readJson = (path) => JSON.parse(readFileSync(path, 'utf8'));
+
+function versionsOf(ref, keys) {
+  const image = inspectImage(ref, '{{json .Image}}');
+  return image === null ? null : currentFromImage(image, keys);
 }
 
 main(async () => {
   const kind = env('KIND');
   const os = env('OS');
+  const minor = env('MINOR');
   let keys;
   if (kind === 'php') keys = ['php'];
   else if (kind === 'frankenphp') keys = ['php', 'frankenphp'];
   else throw new Error(`KIND が php / frankenphp ではない: ${kind}`);
+  const runKind = env('RUN_KIND');
+  if (!['wait', 'push'].includes(runKind)) throw new Error(`RUN_KIND が wait / push ではない: ${runKind}`);
 
   const image = env('IMAGE');
   const digest = env('INDEX_DIGEST');
   if (!/^sha256:[0-9a-f]{64}$/.test(digest)) throw new Error(`INDEX_DIGEST が不正: ${digest}`);
-  const candidate = inspect(`${image}@${digest}`, keys);
+  const candidate = versionsOf(`${image}@${digest}`, keys);
   if (candidate === null) throw new Error(`${image}@${digest} が無い`);
   let tags;
   if (kind === 'php') {
@@ -37,22 +36,15 @@ main(async () => {
     tags = frankenphpTags({ frankenphpVersion: pinned, phpVersion: candidate.php, os });
   }
 
-  const current = inspect(`${image}:${tags.moving}`, keys);
-  let decision = canMoveTag(current, candidate);
-  const stale = decision === 'move' && env('ALLOW_MOVE', { optional: true }) === 'false';
-  if (stale) {
-    console.log(`::warning::この run がビルドに使った pin は main の先端より古いので、移動タグ ${tags.moving} は動かさない`);
-    decision = 'keep';
-  }
+  const current = versionsOf(`${image}:${tags.moving}`, keys);
+  const stale = pinsStale(readJson(env('RUN_VERSIONS_FILE')), readJson(env('MAIN_VERSIONS_FILE')), kind, minor);
+  const decision = decidePublish({ current, candidate, mustLand: runKind === 'wait', stale });
   const detail = `現行 ${JSON.stringify(current)}、今回 ${JSON.stringify(candidate)}`;
-  if (decision === 'conflict') {
-    console.log(`::error::移動タグ ${tags.moving} の現行と今回で、版の一方が上がり一方が下がる（${detail}）。固定タグだけ付けて失敗にする。新しい方の PHP の版を指定した workflow_dispatch で揃える`);
-  } else if (decision === 'keep' && !stale) {
-    console.log(`::warning::移動タグ ${tags.moving} は現行の方が新しいので動かさない（${detail}）`);
-  }
-  console.log(JSON.stringify({ ...tags, decision, candidate, current }));
-  setOutput('fixed', tags.fixed);
-  setOutput('moving', tags.moving);
+  if (decision === 'skip') console.log(`::warning::この run の pin は main の先端より古いのでタグを付けない（後続の run が組み直す）。${detail}`);
+  if (decision === 'keep') console.log(`::warning::移動タグ ${tags.moving} は現行の方が新しいので動かさない（${detail}）`);
+  const refs = tagsToApply(decision, image, tags);
+  console.log(JSON.stringify({ decision, refs, candidate, current, stale }));
   setOutput('decision', decision);
+  setOutput('tags', refs);
   setOutput('phpVersion', candidate.php);
 });

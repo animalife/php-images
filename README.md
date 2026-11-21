@@ -22,8 +22,15 @@ php.net での公開からそのままパッチ入りのイメージを作るた
     --signer-workflow animalife/php-images/.github/workflows/build.yml
   ```
 
+- 固定タグも、同じ版のまま作り直すと指す先が変わる。親イメージ（`baseImages`）や上流の Dockerfile の更新、
+  ビルドの入力の変更で再ビルドすると、同じ `8.6.0-cli-trixie` / `1.14.0-php8.6.0-trixie` が新しい digest を指す。
+  内容を固定したいときは digest で参照する
 - 移動タグは古い版へは戻さない（並走した run の巻き戻しを防ぐため）。意図的に戻すときは手で付け替える。
-  FrankenPHP と PHP の一方が上がり一方が下がる場合は、固定タグだけ付けて run を失敗にする（新しい方の PHP の版を指定した dispatch で揃える）
+  公開の判定は次のとおり（`scripts/lib/publish.mjs`）
+  - この run がビルドに使った pin（`baseImages` や FrankenPHP の pin。php では php に関わるものだけ）が main の先端より古ければ、
+    push の run はタグを付けずに終える（後続の run が組み直す）。版を指定した待機 run は失敗にする
+  - 現行の移動タグの方が新しければ、固定タグだけ付ける
+  - FrankenPHP と PHP の一方が上がり一方が下がる場合は、タグを付けずに run を失敗にする
 - `staging-*` タグは attestation を付ける前の一時置き場で、使わない
 
 ## 設定: versions.json
@@ -32,14 +39,15 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 
 - `php.<minor>`: `officialTag` は「追うタグ」（公式 `php` イメージのタグ）。FrankenPHP は ZTS の PHP を前提にするので、
   8.6 以上は `<minor>-cli-<os>`、8.5 以下は `<minor>-zts-<os>`（上流の docker-bake.hcl の `php_base_variant` と同じ。
-  食い違うとビルドが止まる）。`officialDigest` はそのタグの公式イメージの digest で、Renovate が更新する
+  食い違うとビルドが止まる）。`officialDigest` はそのタグの公式イメージの digest で、Renovate が更新する。
+  これはビルドのきっかけで、内容は固定しない。ビルドする Dockerfile は、ビルドした時点の `library/php` の `GitCommit` から取る
 - `frankenphp`: 上流のタグと commit。Renovate が両方を同時に更新し、ビルドはタグが commit を指しているかを確かめる
 - `baseImages`: 上流の Dockerfile がタグだけで参照する親イメージ（docker-library/php の `FROM debian:trixie-slim`、
   FrankenPHP の bake の `golang-base` や `# syntax=docker/dockerfile:1` など）の digest。`php` と `frankenphp` に分けて持つ。
   上流の Dockerfile は書き換えず、名前付きコンテキスト（`--build-context` / bake の `contexts`）と `BUILDKIT_SYNTAX` で差し替える。
   取得した Dockerfile や bake の定義が pin の無いイメージを参照していたらビルドを止める（上流が親イメージを変えたら、ここに足して直す）。
   Renovate が digest だけを更新する
-- `platforms`: プラットフォームとランナー
+- `platforms`: プラットフォームとランナー。ワークフローの `runs-on` と揃えて手で上げる（Renovate はランナーのメジャー更新を提案しない）
 
 ### 版を足す
 
@@ -79,7 +87,10 @@ php.net で 8.6.1 が公開される（リリース情報に載り、tarball と
 
 - 約 5 時間 45 分のうちに公開されなければ、失敗にせずビルドしないで終える
 - official-images がすでにその版（以降）に追いついていれば、差し替えずにそのままビルドする
-- FrankenPHP は、dispatch した時点ではなく公開を確認した時点の main の pin でビルドする
+- pin は dispatch した時点ではなく、公開を確認した時点の main の `versions.json` を使う
+- FrankenPHP は必ずこの run がビルドした php の上に組む
+- 作ったイメージは php と FrankenPHP の移動タグに必ず載せる。載せられないとき（ビルド中に main の pin が進んだ、
+  版の一方が下がる）は run を失敗にする。同じ版を指定して dispatch し直せば、新しい pin で組み直す
 - 待機中も普段のビルドは止まらない（待機 run は版ごとに別の concurrency グループ）
 
 ### 全部ビルドし直す
@@ -87,6 +98,16 @@ php.net で 8.6.1 が公開される（リリース情報に載り、tarball と
 ```sh
 gh workflow run build.yml -R animalife/php-images
 ```
+
+## 初回の Actions 実行で確かめること
+
+手元では確かめられなかったもの。
+
+- ジョブ単位の `concurrency.queue: max`（publish ジョブ）が効き、待機中の公開が取り消されないこと
+- `uses: $/.github/actions/publish-image` で composite action が解決されること
+- GHCR への push・attestation の push（`gh attestation verify` が通る）・パッケージの可視性
+- 待機 run で、main の `versions.json` を `git fetch origin main` で読み直せること
+- amd64 のビルド（手元では arm64 だけを確かめた）
 
 ## 開発
 

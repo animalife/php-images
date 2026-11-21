@@ -436,29 +436,13 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 待機 run は公開を確認した時点の pin でビルドする。その後に main の pin（親イメージ・FrankenPHP）が進んでいたら、
-      # 新しい pin で組んだ push の run が先に移動タグを取っているかもしれないので、移動タグは動かさない。
+      # 待機 run は公開を確認した時点の main の versions.json（スナップショット）でビルドしている。
       - name: Download versions snapshot
         if: ${{ needs.wait.outputs.found == 'true' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: versions-snapshot
           path: ${{ runner.temp }}/snapshot
-
-      - name: Check pins are still current
-        id: fresh
-        env:
-          SNAPSHOT: ${{ runner.temp }}/snapshot/main-versions.json
-        run: |
-          set -euo pipefail
-          allow=true
-          if [ -f "${SNAPSHOT}" ]; then
-            git fetch --depth 1 origin main
-            git show FETCH_HEAD:versions.json > "${RUNNER_TEMP}/main-now.json"
-            q='{baseImages, frankenphp}'
-            if [ "$(jq -cS "${q}" "${SNAPSHOT}")" != "$(jq -cS "${q}" "${RUNNER_TEMP}/main-now.json")" ]; then allow=false; fi
-          fi
-          echo "allow=${allow}" >> "${GITHUB_OUTPUT}"
 
       - name: Publish
         id: publish
@@ -471,18 +455,21 @@ jobs:
           kind: php
           os: ${{ matrix.os }}
           official-tag: ${{ matrix.officialTag }}
-          allow-move: ${{ steps.fresh.outputs.allow }}
+          run-kind: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
+          run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/main-versions.json', runner.temp) || 'versions.json' }}
+          minor: ${{ matrix.version }}
 
-      # FrankenPHP のビルドが php-base を決めるのに使う。移動タグを動かさなかった（現行の方が新しい）ときは、
-      # この run の php ではなく移動タグの php の上に組ませる。
-      - name: Save index digest
+      # FrankenPHP のビルドが php-base を決めるのに使う（scripts/lib/publish.mjs の choosePhpBase）。
+      - name: Save publish record
         env:
           DIGEST: ${{ steps.publish.outputs.digest }}
           DECISION: ${{ steps.publish.outputs.decision }}
+          PHP_VERSION: ${{ steps.publish.outputs.php-version }}
           VERSION: ${{ matrix.version }}
         run: |
           mkdir -p "${RUNNER_TEMP}/php-digest"
-          echo "${DECISION} ${DIGEST}" > "${RUNNER_TEMP}/php-digest/${VERSION}"
+          jq -n --arg decision "${DECISION}" --arg digest "${DIGEST}" --arg phpVersion "${PHP_VERSION}" \
+            '{$decision, $digest, $phpVersion}' > "${RUNNER_TEMP}/php-digest/${VERSION}.json"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -551,33 +538,16 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve php digest
+      - name: Resolve php base
         id: php
         env:
-          VERSION: ${{ matrix.version }}
+          MINOR: ${{ matrix.version }}
           OFFICIAL_TAG: ${{ matrix.officialTag }}
           PHP_VERSIONS: ${{ needs.plan.outputs.phpVersions }}
-        run: |
-          set -euo pipefail
-          f="${RUNNER_TEMP}/php-digest/${VERSION}"
-          built="$(jq -r --arg v "${VERSION}" 'any(.[]; . == $v)' <<< "${PHP_VERSIONS}")"
-          if [ "${built}" = "true" ] && [ ! -f "${f}" ]; then
-            echo "::error::この run で php ${VERSION} をビルドするはずだったが、公開の結果が無い"
-            exit 1
-          fi
-          decision=""
-          if [ -f "${f}" ]; then read -r decision digest < "${f}"; fi
-          if [ "${decision}" = "move" ]; then
-            echo "この run でビルドした php を使う: ${digest}"
-          else
-            digest="$(docker buildx imagetools inspect "${PHP_IMAGE}:${OFFICIAL_TAG}" --format '{{json .Manifest}}' | jq -r .digest)"
-            echo "現行の ${PHP_IMAGE}:${OFFICIAL_TAG} を使う: ${digest}"
-          fi
-          if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::php の digest を読めない: '${digest}'"
-            exit 1
-          fi
-          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+          RUN_KIND: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
+          RECORD_FILE: ${{ runner.temp }}/php-digest/${{ matrix.version }}.json
+          OUT_FILE: ${{ runner.temp }}/php-base.json
+        run: node scripts/resolve-php-base.mjs
 
       - name: Pin base images
         id: bake
@@ -610,6 +580,7 @@ jobs:
           # 上流 docker-bake.hcl の secret に渡る。
           GITHUB_TOKEN: ${{ github.token }}
           PIN_ARGS: ${{ steps.bake.outputs.args }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
         working-directory: frankenphp
         run: |
           set -euo pipefail
@@ -624,6 +595,10 @@ jobs:
             --set "${TARGET}.platform=${PLATFORM}" \
             --set "${TARGET}.tags=" \
             --set "${TARGET}.attest=type=provenance,disabled=true" \
+            --set "${TARGET}.labels.org.opencontainers.image.source=${SOURCE}" \
+            --set "${TARGET}.labels.org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --set "${TARGET}.labels.dev.animalife.php-images.frankenphp.revision=${SHA}" \
+            --set "${TARGET}.labels.dev.animalife.php-images.php-base=${PHP_IMAGE}@${PHP_DIGEST}" \
             --set "${TARGET}.output=type=oci,dest=${RUNNER_TEMP}/oci/image.tar,oci-mediatypes=true,rewrite-timestamp=true" \
             --metadata-file "${RUNNER_TEMP}/metadata.json"
           digest="$(jq -r --arg t "${TARGET}" '.[$t]."containerimage.digest"' "${RUNNER_TEMP}/metadata.json")"
@@ -632,6 +607,7 @@ jobs:
             exit 1
           fi
           echo "${digest}" > "${RUNNER_TEMP}/oci/digest"
+          cp "${RUNNER_TEMP}/php-base.json" "${RUNNER_TEMP}/oci/php-base.json"
           {
             echo "### frankenphp ${SLUG}"
             echo ""
@@ -685,6 +661,7 @@ jobs:
             "oci-archive:${RUNNER_TEMP}/oci/image.tar" "docker://${FRANKENPHP_IMAGE}@${digest}"
           mkdir -p "${RUNNER_TEMP}/digest"
           echo "${digest}" > "${RUNNER_TEMP}/digest/${SLUG}"
+          cp "${RUNNER_TEMP}/oci/php-base.json" "${RUNNER_TEMP}/digest/${SLUG}.php-base.json"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -738,10 +715,16 @@ jobs:
           ref="${FRANKENPHP_IMAGE}@${digest}"
           docker pull "${ref}"
           container-structure-test test --image "${ref}" --config tests/frankenphp/container-structure-test.yaml
-          php_version="$(docker image inspect "${ref}" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PHP_VERSION=//p')"
-          expected="FrankenPHP ${FRANKENPHP_VERSION} PHP ${php_version} Caddy "
+          # 期待する PHP の版は、ビルドで php-base に選んだ php イメージの版（イメージ自身からは作らない）。
+          expected_php="$(jq -r .phpVersion "${RUNNER_TEMP}/digest/${SLUG}.php-base.json")"
+          env_php="$(docker image inspect "${ref}" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PHP_VERSION=//p')"
+          if [ "${env_php}" != "${expected_php}" ]; then
+            echo "::error::イメージの PHP_VERSION が '${env_php}' で、php-base の ${expected_php} と違う"
+            exit 1
+          fi
+          expected="FrankenPHP ${FRANKENPHP_VERSION} PHP ${expected_php} Caddy "
           actual="$(docker run --rm "${ref}" frankenphp version)"
-          if [ -z "${php_version}" ] || [[ "${actual}" != "${expected}"* ]]; then
+          if [[ "${actual}" != "${expected}"* ]]; then
             echo "::error::frankenphp version が '${actual}' で、'${expected}' で始まらない"
             exit 1
           fi
@@ -749,7 +732,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: frankenphp-verified-${{ matrix.slug }}
-          path: ${{ runner.temp }}/digest/
+          path: ${{ runner.temp }}/digest/${{ matrix.slug }}
           if-no-files-found: error
           retention-days: 1
 
@@ -795,29 +778,13 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 待機 run は公開を確認した時点の pin でビルドする。その後に main の pin（親イメージ・FrankenPHP）が進んでいたら、
-      # 新しい pin で組んだ push の run が先に移動タグを取っているかもしれないので、移動タグは動かさない。
+      # 待機 run は公開を確認した時点の main の versions.json（スナップショット）でビルドしている。
       - name: Download versions snapshot
         if: ${{ needs.wait.outputs.found == 'true' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: versions-snapshot
           path: ${{ runner.temp }}/snapshot
-
-      - name: Check pins are still current
-        id: fresh
-        env:
-          SNAPSHOT: ${{ runner.temp }}/snapshot/main-versions.json
-        run: |
-          set -euo pipefail
-          allow=true
-          if [ -f "${SNAPSHOT}" ]; then
-            git fetch --depth 1 origin main
-            git show FETCH_HEAD:versions.json > "${RUNNER_TEMP}/main-now.json"
-            q='{baseImages, frankenphp}'
-            if [ "$(jq -cS "${q}" "${SNAPSHOT}")" != "$(jq -cS "${q}" "${RUNNER_TEMP}/main-now.json")" ]; then allow=false; fi
-          fi
-          echo "allow=${allow}" >> "${GITHUB_OUTPUT}"
 
       - name: Publish
         uses: $/.github/actions/publish-image
@@ -829,4 +796,6 @@ jobs:
           kind: frankenphp
           os: ${{ matrix.os }}
           frankenphp-version: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}
-          allow-move: ${{ steps.fresh.outputs.allow }}
+          run-kind: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
+          run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/main-versions.json', runner.temp) || 'versions.json' }}
+          minor: ${{ matrix.version }}

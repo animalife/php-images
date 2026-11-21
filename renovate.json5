@@ -185,6 +185,17 @@
             automerge: true,
         },
         {
+            description: 'ランナーのラベル（runs-on の ubuntu-24.04 など）と .node-version のメジャー更新は提案させない。ランナーは versions.json の platforms にも書いてあり、片方だけ上がると食い違う。上げるときは両方を手で揃える',
+            matchDatasources: [
+                'github-runners',
+                'node-version',
+            ],
+            matchUpdateTypes: [
+                'major',
+            ],
+            enabled: false,
+        },
+        {
             description: 'aqua の版の更新は aqua-checksums.json の作り直し（`AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune`）が要るので、1 つの PR にまとめて手動マージにする',
             matchFileNames: [
                 '.github/aqua.yaml',

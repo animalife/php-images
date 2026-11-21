@@ -30,18 +30,26 @@ inputs:
     description: kind=frankenphp のときの pin した版
     required: false
     default: ''
-  allow-move:
-    description: false なら移動タグを動かさない（固定タグだけ付ける）
-    required: false
-    default: 'true'
+  minor:
+    description: PHP の minor（versions.json の php のキー）
+    required: true
+  run-kind:
+    description: wait（版を指定した待機 run。移動タグに載せられなければ失敗）/ push
+    required: true
+  run-versions-file:
+    description: この run がビルドに使った versions.json
+    required: true
 
 outputs:
   digest:
     description: 公開した index の digest
     value: ${{ steps.index.outputs.digest }}
   decision:
-    description: 移動タグの判定（move / keep。conflict のときは step が失敗する）
+    description: タグの判定（move / keep / skip）
     value: ${{ steps.tags.outputs.decision }}
+  php-version:
+    description: 公開した index の PHP の版
+    value: ${{ steps.tags.outputs.phpVersion }}
 
 runs:
   using: composite
@@ -85,6 +93,14 @@ runs:
         subject-digest: ${{ steps.index.outputs.digest }}
         push-to-registry: true
 
+    # pin の古さは、この run の versions.json と main の先端のものを比べて決める。
+    - name: Fetch versions.json on main
+      shell: bash
+      run: |
+        set -euo pipefail
+        git fetch --depth 1 origin main
+        git show FETCH_HEAD:versions.json > "${RUNNER_TEMP}/main-versions.json"
+
     - name: Decide tags
       id: tags
       shell: bash
@@ -95,7 +111,10 @@ runs:
         FRANKENPHP_VERSION: ${{ inputs.frankenphp-version }}
         IMAGE: ${{ inputs.image }}
         INDEX_DIGEST: ${{ steps.index.outputs.digest }}
-        ALLOW_MOVE: ${{ inputs.allow-move }}
+        MINOR: ${{ inputs.minor }}
+        RUN_KIND: ${{ inputs.run-kind }}
+        RUN_VERSIONS_FILE: ${{ inputs.run-versions-file }}
+        MAIN_VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
       run: node scripts/publish-tags.mjs
 
     - name: Tag
@@ -103,18 +122,19 @@ runs:
       env:
         IMAGE: ${{ inputs.image }}
         INDEX_DIGEST: ${{ steps.index.outputs.digest }}
-        FIXED: ${{ steps.tags.outputs.fixed }}
-        MOVING: ${{ steps.tags.outputs.moving }}
         DECISION: ${{ steps.tags.outputs.decision }}
+        TAGS: ${{ steps.tags.outputs.tags }}
       run: |
         set -euo pipefail
-        tags=(-t "${IMAGE}:${FIXED}")
-        if [ "${DECISION}" = "move" ]; then tags+=(-t "${IMAGE}:${MOVING}"); fi
-        docker buildx imagetools create "${tags[@]}" "${IMAGE}@${INDEX_DIGEST}"
+        mapfile -t refs < <(jq -r '.[]' <<< "${TAGS}")
+        args=()
+        for r in "${refs[@]}"; do args+=(-t "${r}"); done
+        if [ "${#args[@]}" -gt 0 ]; then
+          docker buildx imagetools create "${args[@]}" "${IMAGE}@${INDEX_DIGEST}"
+        fi
         {
           echo "### ${IMAGE}"
           echo ""
-          echo "- digest: \`${INDEX_DIGEST}\`"
-          echo "- tags: \`${FIXED}\`$([ "${DECISION}" = "move" ] && echo ", \`${MOVING}\`" || echo "（移動タグ ${MOVING} は動かしていない: ${DECISION}）")"
+          echo "- digest: \`${INDEX_DIGEST}\`（判定: ${DECISION}）"
+          for r in "${refs[@]}"; do echo "- \`${r}\`"; done
         } >> "${GITHUB_STEP_SUMMARY}"
-        if [ "${DECISION}" = "conflict" ]; then exit 1; fi
