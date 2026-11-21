@@ -1,0 +1,116 @@
+name: publish-image
+description: >-
+  検査済みのアーキごとの digest から index を作り、attestation を付けてから本タグを付ける。
+  呼び出し側でリポジトリの checkout・Node のセットアップ・GHCR へのログインを済ませておくこと。
+  権限は packages: write / id-token: write / attestations: write / artifact-metadata: write が要る。
+
+inputs:
+  image:
+    description: タグなしのイメージ名（例 ghcr.io/animalife/php-images/php）
+    required: true
+  digests-dir:
+    description: 検査済みの digest を 1 ファイル 1 行で置いたディレクトリ
+    required: true
+  expected-count:
+    description: digest の数（プラットフォーム数）
+    required: true
+  staging-tag:
+    description: index を attestation 前に置くタグ
+    required: true
+  kind:
+    description: php / frankenphp
+    required: true
+  os:
+    required: true
+  official-tag:
+    description: kind=php のときの追うタグ
+    required: false
+    default: ''
+  frankenphp-version:
+    description: kind=frankenphp のときの pin した版
+    required: false
+    default: ''
+
+outputs:
+  digest:
+    description: 公開した index の digest
+    value: ${{ steps.index.outputs.digest }}
+  decision:
+    description: 移動タグの判定（move / keep。conflict のときは step が失敗する）
+    value: ${{ steps.tags.outputs.decision }}
+
+runs:
+  using: composite
+  steps:
+    - name: Create index under the staging tag
+      id: index
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        DIGESTS_DIR: ${{ inputs.digests-dir }}
+        EXPECTED: ${{ inputs.expected-count }}
+        STAGING_TAG: ${{ inputs.staging-tag }}
+      run: |
+        set -euo pipefail
+        mapfile -t digests < <(cat "${DIGESTS_DIR}"/*)
+        if [ "${#digests[@]}" -ne "${EXPECTED}" ]; then
+          echo "::error::検査済みの digest が ${EXPECTED} 個ではない（${#digests[@]} 個）"
+          exit 1
+        fi
+        sources=()
+        for d in "${digests[@]}"; do
+          if ! [[ "${d}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::digest が不正: '${d}'"
+            exit 1
+          fi
+          sources+=("${IMAGE}@${d}")
+        done
+        docker buildx imagetools create --metadata-file "${RUNNER_TEMP}/index.json" \
+          -t "${IMAGE}:${STAGING_TAG}" "${sources[@]}"
+        digest="$(jq -r '."containerimage.descriptor".digest' "${RUNNER_TEMP}/index.json")"
+        if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          echo "::error::index の digest を読めない: '${digest}'"
+          exit 1
+        fi
+        echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+    - name: Attest build provenance
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-name: ${{ inputs.image }}
+        subject-digest: ${{ steps.index.outputs.digest }}
+        push-to-registry: true
+
+    - name: Decide tags
+      id: tags
+      shell: bash
+      env:
+        KIND: ${{ inputs.kind }}
+        OS: ${{ inputs.os }}
+        OFFICIAL_TAG: ${{ inputs.official-tag }}
+        FRANKENPHP_VERSION: ${{ inputs.frankenphp-version }}
+        IMAGE: ${{ inputs.image }}
+        INDEX_DIGEST: ${{ steps.index.outputs.digest }}
+      run: node scripts/publish-tags.mjs
+
+    - name: Tag
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        INDEX_DIGEST: ${{ steps.index.outputs.digest }}
+        FIXED: ${{ steps.tags.outputs.fixed }}
+        MOVING: ${{ steps.tags.outputs.moving }}
+        DECISION: ${{ steps.tags.outputs.decision }}
+      run: |
+        set -euo pipefail
+        tags=(-t "${IMAGE}:${FIXED}")
+        if [ "${DECISION}" = "move" ]; then tags+=(-t "${IMAGE}:${MOVING}"); fi
+        docker buildx imagetools create "${tags[@]}" "${IMAGE}@${INDEX_DIGEST}"
+        {
+          echo "### ${IMAGE}"
+          echo ""
+          echo "- digest: \`${INDEX_DIGEST}\`"
+          echo "- tags: \`${FIXED}\`$([ "${DECISION}" = "move" ] && echo ", \`${MOVING}\`" || echo "（移動タグ ${MOVING} は動かしていない: ${DECISION}）")"
+        } >> "${GITHUB_STEP_SUMMARY}"
+        # 固定タグは付けたうえで、移動タグを決められないときは run を失敗にして人に知らせる。
+        if [ "${DECISION}" = "conflict" ]; then exit 1; fi

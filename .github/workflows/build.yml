@@ -1,0 +1,684 @@
+name: build
+
+# php（docker-library/php の Dockerfile）と、それを php-base に注入した FrankenPHP をビルドして GHCR に公開する。
+#
+# - push（main）: versions.json の差分からビルドする版を決める。Renovate が追うタグの公式イメージの digest
+#   （= docker-library 側の更新）や FrankenPHP の pin を更新し、そのマージで走るのが普段の経路。
+# - workflow_dispatch（版の指定あり）: php.net でその版が公開されるのを待ち、公開されたら
+#   PHP_VERSION / PHP_URL・PHP_ASC_URL / PHP_SHA256 だけを差し替えてビルドする（予告がある夜の経路）。
+# - workflow_dispatch（版の指定なし）: 全版をビルドし直す。
+#
+# schedule は置かない（public リポジトリは 60 日 activity が無いと schedule が自動で無効になるため）。
+# php → FrankenPHP は同じ run の中で needs でつなぐ。GITHUB_TOKEN による push のイベントでは
+# 別のワークフローが起動しないので、ワークフローを分けた連鎖にはしない。
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      php-version:
+        description: '公開を待ってビルドする PHP の版（例 8.6.1）。空なら全版をビルドし直す'
+        required: false
+        type: string
+        default: ''
+
+permissions: {}
+
+concurrency:
+  # 待機する run（最大 6 時間）は版ごとに分け、普段のビルドを止めない。
+  # 公開（タグの書き込み）は各 publish ジョブの concurrency で版ごとに直列にする。
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.php-version != '' && format('wait-{0}', inputs.php-version) || 'build' }}
+  cancel-in-progress: false
+  # 既定（queue: single）では 3 本目の push で 2 本目の pending が黙って置き換わり、
+  # その push の変更がどの run でもビルドされない（plan は event.before との差分で決めるため）。
+  queue: max
+
+env:
+  PHP_IMAGE: ghcr.io/${{ github.repository }}/php
+  FRANKENPHP_IMAGE: ghcr.io/${{ github.repository }}/frankenphp
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout に必要
+    outputs:
+      phpVersions: ${{ steps.plan.outputs.phpVersions }}
+      phpBuilds: ${{ steps.plan.outputs.phpBuilds }}
+      phpPublishes: ${{ steps.plan.outputs.phpPublishes }}
+      frankenphpBuilds: ${{ steps.plan.outputs.frankenphpBuilds }}
+      frankenphpPublishes: ${{ steps.plan.outputs.frankenphpPublishes }}
+      frankenphpVersion: ${{ steps.plan.outputs.frankenphpVersion }}
+      frankenphpCommit: ${{ steps.plan.outputs.frankenphpCommit }}
+      platformCount: ${{ steps.plan.outputs.platformCount }}
+      waitFor: ${{ steps.plan.outputs.waitFor }}
+    steps:
+      # dispatch した ref の workflow ファイルが実行されるので、ブランチ上で外せば素通りできる
+      # （強制力のある境界ではなく誤操作のガード）。skip ではなく失敗にして誤 ref に気付けるようにする。
+      - name: Reject non-main dispatch
+        if: ${{ github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' }}
+        run: |
+          echo "::error::workflow_dispatch は main からのみ実行できます（選択された ref: ${GITHUB_REF}）"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # push の差分を event.before と比べるため、履歴を全部取る。
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Plan
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PHP_VERSION_INPUT: ${{ inputs.php-version }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: node scripts/plan.mjs
+
+      - name: Verify FrankenPHP tag points at the pinned commit
+        run: node scripts/verify-frankenphp-pin.mjs
+
+  wait:
+    name: Wait for php.net release
+    needs: plan
+    if: ${{ needs.plan.outputs.waitFor != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read # checkout に必要
+    outputs:
+      found: ${{ steps.wait.outputs.found }}
+      frankenphpVersion: ${{ steps.pin.outputs.version }}
+      frankenphpCommit: ${{ steps.pin.outputs.commit }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      # 期限は job の timeout-minutes より手前に置き、未公開のまま失敗扱いにならず静かに終える。
+      - name: Wait
+        id: wait
+        env:
+          PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
+          RELEASE_FILE: ${{ runner.temp }}/php-release.json
+          INTERVAL_SECONDS: '180'
+          DEADLINE_SECONDS: '20700'
+        run: node scripts/wait-php-release.mjs
+
+      # 待つ間に Renovate が FrankenPHP の pin を進めていたら、公開時点の main の pin でビルドする。
+      # dispatch 時点の pin のまま作ると、先に移動タグを取った新しい FrankenPHP と食い違い、パッチが移動タグに乗らない。
+      - name: Re-read the FrankenPHP pin from main
+        id: pin
+        if: ${{ steps.wait.outputs.found == 'true' }}
+        env:
+          VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
+        run: |
+          set -euo pipefail
+          git fetch --depth 1 origin main
+          git show FETCH_HEAD:versions.json > "${VERSIONS_FILE}"
+          node scripts/verify-frankenphp-pin.mjs
+
+      - name: Upload release info
+        if: ${{ steps.wait.outputs.found == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: php-release
+          path: ${{ runner.temp }}/php-release.json
+          if-no-files-found: error
+          retention-days: 1
+
+  # 版ごとに 1 回だけ上流の Dockerfile を取得・差し替えし、両アーキに同じコンテキストを配る。
+  php-prepare:
+    name: Prepare php ${{ matrix.version }}
+    needs: [plan, wait]
+    if: ${{ !failure() && !cancelled() && needs.plan.outputs.phpVersions != '[]' && (needs.wait.result == 'skipped' || needs.wait.outputs.found == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout に必要
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.phpPublishes) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - name: Download release info
+        if: ${{ needs.wait.outputs.found == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: php-release
+          path: ${{ runner.temp }}/release
+
+      # raw.githubusercontent.com は使わない。cache-control: max-age=300 で最大 5 分古い内容が返る
+      # （2026-11-21、curl -sI https://raw.githubusercontent.com/docker-library/official-images/HEAD/library/php で確認）。
+      - name: Fetch library/php
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/docker-library/official-images/contents/library/php \
+            -H 'Accept: application/vnd.github.raw+json' > "${RUNNER_TEMP}/library-php"
+
+      - name: Resolve upstream directory
+        id: resolve
+        env:
+          LIBRARY_FILE: ${{ runner.temp }}/library-php
+          OFFICIAL_TAG: ${{ matrix.officialTag }}
+        run: node scripts/resolve-official.mjs
+
+      - name: Checkout docker-library/php
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: docker-library/php
+          ref: ${{ steps.resolve.outputs.gitCommit }}
+          path: upstream
+          sparse-checkout: ${{ steps.resolve.outputs.directory }}
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Override PHP version
+        id: rewrite
+        env:
+          DOCKERFILE: upstream/${{ steps.resolve.outputs.directory }}/Dockerfile
+          RELEASE_FILE: ${{ needs.wait.outputs.found == 'true' && format('{0}/release/php-release.json', runner.temp) || '' }}
+        run: node scripts/rewrite-php-dockerfile.mjs
+
+      # upload-artifact はファイルモードを保たないので、docker-php-* の実行ビットごと tar に固める。
+      - name: Pack build context
+        env:
+          DIRECTORY: upstream/${{ steps.resolve.outputs.directory }}
+          VERSION: ${{ matrix.version }}
+          GIT_COMMIT: ${{ steps.resolve.outputs.gitCommit }}
+          UPSTREAM_DIRECTORY: ${{ steps.resolve.outputs.directory }}
+          PHP_VERSION: ${{ steps.rewrite.outputs.phpVersion }}
+          OVERRIDDEN: ${{ steps.rewrite.outputs.overridden }}
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/php-context"
+          mkdir -p "${out}"
+          tar -C "${DIRECTORY}" -cf "${out}/context.tar" .
+          jq -n --arg phpVersion "${PHP_VERSION}" --arg gitCommit "${GIT_COMMIT}" \
+            --arg directory "${UPSTREAM_DIRECTORY}" --arg overridden "${OVERRIDDEN}" \
+            '{$phpVersion, $gitCommit, $directory, $overridden}' > "${out}/meta.json"
+          cat "${out}/meta.json"
+          {
+            echo "### php ${VERSION}"
+            echo ""
+            echo "- 上流: docker-library/php@${GIT_COMMIT} ${UPSTREAM_DIRECTORY}"
+            echo "- PHP: ${PHP_VERSION}（php.net の版への差し替え: ${OVERRIDDEN}）"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: php-context-${{ matrix.version }}
+          path: ${{ runner.temp }}/php-context/
+          if-no-files-found: error
+          retention-days: 1
+
+  php-build:
+    name: Build php ${{ matrix.slug }}
+    needs: [plan, php-prepare]
+    if: ${{ !cancelled() && needs.php-prepare.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      packages: write # push-by-digest に必要
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.phpBuilds) }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: php-context-${{ matrix.version }}
+          path: ${{ runner.temp }}/php-context
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # タグを付けずに digest だけで push する。タグは検査を通った後に publish が付ける。
+      - name: Build and push by digest
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          SLUG: ${{ matrix.slug }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ctx="${RUNNER_TEMP}/php-context"
+          mkdir -p "${ctx}/src"
+          tar -C "${ctx}/src" -xf "${ctx}/context.tar"
+          meta="${ctx}/meta.json"
+          docker buildx build "${ctx}/src" \
+            --platform "${PLATFORM}" \
+            --pull \
+            --provenance=false \
+            --label "org.opencontainers.image.source=${SOURCE}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=$(jq -r .phpVersion "${meta}")" \
+            --label "dev.animalife.php-images.upstream=https://github.com/docker-library/php/tree/$(jq -r .gitCommit "${meta}")/$(jq -r .directory "${meta}")" \
+            --label "dev.animalife.php-images.php-overridden=$(jq -r .overridden "${meta}")" \
+            --output "type=image,name=${PHP_IMAGE},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true" \
+            --metadata-file "${RUNNER_TEMP}/metadata.json"
+          digest="$(jq -r '."containerimage.digest"' "${RUNNER_TEMP}/metadata.json")"
+          if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::digest を読めない: '${digest}'"
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/digest"
+          echo "${digest}" > "${RUNNER_TEMP}/digest/${SLUG}"
+
+      # publish が読むのは php-verified-* だけ。ここで verified の名前を使うと、検査前の digest にタグが付く。
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: php-unverified-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digest/
+          if-no-files-found: error
+          retention-days: 1
+
+  # 外部製の container-structure-test に packages: write のトークンを渡さないよう、ビルドとは別ジョブにする。
+  php-test:
+    name: Test php ${{ matrix.slug }}
+    needs: [plan, php-build]
+    if: ${{ !cancelled() && needs.php-build.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read # checkout に必要
+      packages: read # push-by-digest したイメージの pull に必要
+    env:
+      AQUA_CONFIG: .github/aqua.yaml
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.phpBuilds) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: php-unverified-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digest
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: php-context-${{ matrix.version }}
+          path: ${{ runner.temp }}/php-context
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
+        with:
+          aqua_version: v2.66.1
+
+      # ランナーはビルドしたアーキと同じなので、CST の --platform は既定（ホスト）でよい。
+      - name: Test
+        env:
+          SLUG: ${{ matrix.slug }}
+        run: |
+          set -euo pipefail
+          digest="$(cat "${RUNNER_TEMP}/digest/${SLUG}")"
+          ref="${PHP_IMAGE}@${digest}"
+          docker pull "${ref}"
+          container-structure-test test --image "${ref}" --config tests/php/container-structure-test.yaml
+          expected="$(jq -r .phpVersion "${RUNNER_TEMP}/php-context/meta.json")"
+          actual="$(docker run --rm "${ref}" php -r 'echo PHP_VERSION;')"
+          if [ "${actual}" != "${expected}" ]; then
+            echo "::error::php の版が ${actual} で、期待した ${expected} と違う"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: php-verified-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digest/
+          if-no-files-found: error
+          retention-days: 1
+
+  php-publish:
+    name: Publish php ${{ matrix.version }}
+    needs: [plan, php-test]
+    # どれか 1 つのアーキの検査が落ちたら、その run のタグ付けは全部止める。
+    if: ${{ !cancelled() && needs.php-test.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: publish-php-${{ matrix.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: read # checkout に必要
+      packages: write # index とタグの push、attestation の push に必要
+      id-token: write # attestation の署名に必要
+      attestations: write # attestation の保存に必要
+      artifact-metadata: write # attestation のストレージレコード作成に必要
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.phpPublishes) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      # 数は publish-image が検査する。pattern 指定の download-artifact は一致が 0 件でも失敗しない
+      # （2026-11-21、actions/download-artifact@9000827 の src で件数を検査していないことを確認）。
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: php-verified-${{ matrix.version }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        id: publish
+        uses: $/.github/actions/publish-image
+        with:
+          image: ${{ env.PHP_IMAGE }}
+          digests-dir: ${{ runner.temp }}/digests
+          expected-count: ${{ needs.plan.outputs.platformCount }}
+          staging-tag: staging-${{ matrix.version }}
+          kind: php
+          os: ${{ matrix.os }}
+          official-tag: ${{ matrix.officialTag }}
+
+      # FrankenPHP のビルドが php-base を決めるのに使う。移動タグを動かさなかった（現行の方が新しい）ときは、
+      # この run の php ではなく移動タグの php の上に組ませる。
+      - name: Save index digest
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          DECISION: ${{ steps.publish.outputs.decision }}
+          VERSION: ${{ matrix.version }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/php-digest"
+          echo "${DECISION} ${DIGEST}" > "${RUNNER_TEMP}/php-digest/${VERSION}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: php-digest-${{ matrix.version }}
+          path: ${{ runner.temp }}/php-digest/
+          if-no-files-found: error
+          retention-days: 1
+
+  frankenphp-build:
+    name: Build frankenphp ${{ matrix.slug }}
+    needs: [plan, wait, php-publish]
+    # php のジョブが skipped（FrankenPHP の pin だけの更新）でも走らせる。
+    # needs だけだと依存先が skipped のとき後続も skipped になる。
+    if: ${{ !failure() && !cancelled() && needs.plan.outputs.frankenphpBuilds != '[]' && (needs.wait.result == 'skipped' || needs.wait.outputs.found == 'true') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write # push-by-digest と php イメージの pull に必要
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.frankenphpBuilds) }}
+    steps:
+      - name: Checkout php/frankenphp
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: php/frankenphp
+          ref: ${{ needs.wait.outputs.frankenphpCommit || needs.plan.outputs.frankenphpCommit }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: php-digest-${{ matrix.version }}
+          path: ${{ runner.temp }}/php-digest
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve php digest
+        id: php
+        env:
+          VERSION: ${{ matrix.version }}
+          OFFICIAL_TAG: ${{ matrix.officialTag }}
+          PHP_VERSIONS: ${{ needs.plan.outputs.phpVersions }}
+        run: |
+          set -euo pipefail
+          f="${RUNNER_TEMP}/php-digest/${VERSION}"
+          built="$(jq -r --arg v "${VERSION}" 'any(.[]; . == $v)' <<< "${PHP_VERSIONS}")"
+          if [ "${built}" = "true" ] && [ ! -f "${f}" ]; then
+            echo "::error::この run で php ${VERSION} をビルドするはずだったが、公開の結果が無い"
+            exit 1
+          fi
+          decision=""
+          if [ -f "${f}" ]; then read -r decision digest < "${f}"; fi
+          if [ "${decision}" = "move" ]; then
+            echo "この run でビルドした php を使う: ${digest}"
+          else
+            digest="$(docker buildx imagetools inspect "${PHP_IMAGE}:${OFFICIAL_TAG}" --format '{{json .Manifest}}' | jq -r .digest)"
+            echo "現行の ${PHP_IMAGE}:${OFFICIAL_TAG} を使う: ${digest}"
+          fi
+          if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::php の digest を読めない: '${digest}'"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      # 上流 docker-bake.hcl が PHP の系列ごとに選ぶ php-base と、versions.json の追うタグが
+      # 食い違ったら止める。黙って注入すると、上流が想定しない php の上で FrankenPHP を組むことになる。
+      - name: Check upstream php-base
+        id: bake
+        env:
+          VERSION: ${{ matrix.version }}
+          OS: ${{ matrix.os }}
+          OFFICIAL_TAG: ${{ matrix.officialTag }}
+        run: |
+          set -euo pipefail
+          target="runner-php-${VERSION//./-}-${OS}"
+          upstream="$(PHP_VERSION="${VERSION}" SHA='' docker buildx bake --print "${target}" | jq -r --arg t "${target}" '.target[$t].contexts["php-base"]')"
+          if [ "${upstream}" != "docker-image://php:${OFFICIAL_TAG}" ]; then
+            echo "::error::上流の docker-bake.hcl の php-base は ${upstream} で、versions.json の追うタグ php:${OFFICIAL_TAG} と違う"
+            exit 1
+          fi
+          echo "target=${target}" >> "${GITHUB_OUTPUT}"
+
+      # 上流の docker-bake.hcl をそのまま使い、php-base だけを自前の php に差し替える。
+      # golang-base などの他の context、args、labels、secret は上流の定義に従う。
+      - name: Build and push by digest
+        env:
+          TARGET: ${{ steps.bake.outputs.target }}
+          PLATFORM: ${{ matrix.platform }}
+          SLUG: ${{ matrix.slug }}
+          PHP_DIGEST: ${{ steps.php.outputs.digest }}
+          PHP_VERSION: ${{ matrix.version }}
+          VERSION: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}
+          SHA: ${{ needs.wait.outputs.frankenphpCommit || needs.plan.outputs.frankenphpCommit }}
+          LATEST: 'false'
+          # 上流 docker-bake.hcl の secret（id=github-token,env=GITHUB_TOKEN）に渡る。
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # created と layer の時刻を FrankenPHP の commit 日時に揃え、同じ入力から同じ digest にする。
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          CREATED="$(TZ=UTC git log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format=%cd)"
+          export SOURCE_DATE_EPOCH CREATED
+          docker buildx bake "${TARGET}" \
+            --pull \
+            --set "${TARGET}.contexts.php-base=docker-image://${PHP_IMAGE}@${PHP_DIGEST}" \
+            --set "${TARGET}.platform=${PLATFORM}" \
+            --set "${TARGET}.tags=" \
+            --set "${TARGET}.attest=type=provenance,disabled=true" \
+            --set "${TARGET}.output=type=image,name=${FRANKENPHP_IMAGE},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true,rewrite-timestamp=true" \
+            --metadata-file "${RUNNER_TEMP}/metadata.json"
+          digest="$(jq -r --arg t "${TARGET}" '.[$t]."containerimage.digest"' "${RUNNER_TEMP}/metadata.json")"
+          if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::digest を読めない: '${digest}'"
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/digest"
+          echo "${digest}" > "${RUNNER_TEMP}/digest/${SLUG}"
+          {
+            echo "### frankenphp ${SLUG}"
+            echo ""
+            echo "- FrankenPHP: ${VERSION}（${SHA}）"
+            echo "- php-base: \`${PHP_IMAGE}@${PHP_DIGEST}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frankenphp-unverified-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digest/
+          if-no-files-found: error
+          retention-days: 1
+
+  frankenphp-test:
+    name: Test frankenphp ${{ matrix.slug }}
+    needs: [plan, wait, frankenphp-build]
+    if: ${{ !cancelled() && needs.frankenphp-build.result == 'success' }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read # checkout に必要
+      packages: read # push-by-digest したイメージの pull に必要
+    env:
+      AQUA_CONFIG: .github/aqua.yaml
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.frankenphpBuilds) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: frankenphp-unverified-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digest
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
+        with:
+          aqua_version: v2.66.1
+
+      - name: Test
+        env:
+          SLUG: ${{ matrix.slug }}
+          FRANKENPHP_VERSION: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}
+        run: |
+          set -euo pipefail
+          digest="$(cat "${RUNNER_TEMP}/digest/${SLUG}")"
+          ref="${FRANKENPHP_IMAGE}@${digest}"
+          docker pull "${ref}"
+          container-structure-test test --image "${ref}" --config tests/frankenphp/container-structure-test.yaml
+          php_version="$(docker image inspect "${ref}" --format '{{range .Config.Env}}{{println .}}{{end}}' | sed -n 's/^PHP_VERSION=//p')"
+          expected="FrankenPHP ${FRANKENPHP_VERSION} PHP ${php_version} Caddy "
+          actual="$(docker run --rm "${ref}" frankenphp version)"
+          if [ -z "${php_version}" ] || [[ "${actual}" != "${expected}"* ]]; then
+            echo "::error::frankenphp version が '${actual}' で、'${expected}' で始まらない"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: frankenphp-verified-${{ matrix.slug }}
+          path: ${{ runner.temp }}/digest/
+          if-no-files-found: error
+          retention-days: 1
+
+  frankenphp-publish:
+    name: Publish frankenphp ${{ matrix.version }}
+    needs: [plan, wait, frankenphp-test]
+    if: ${{ !cancelled() && needs.frankenphp-test.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: publish-frankenphp-${{ matrix.version }}
+      cancel-in-progress: false
+    permissions:
+      contents: read # checkout に必要
+      packages: write # index とタグの push、attestation の push に必要
+      id-token: write # attestation の署名に必要
+      attestations: write # attestation の保存に必要
+      artifact-metadata: write # attestation のストレージレコード作成に必要
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.frankenphpPublishes) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: frankenphp-verified-${{ matrix.version }}-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish
+        uses: $/.github/actions/publish-image
+        with:
+          image: ${{ env.FRANKENPHP_IMAGE }}
+          digests-dir: ${{ runner.temp }}/digests
+          expected-count: ${{ needs.plan.outputs.platformCount }}
+          staging-tag: staging-php${{ matrix.version }}-${{ matrix.os }}
+          kind: frankenphp
+          os: ${{ matrix.os }}
+          frankenphp-version: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}

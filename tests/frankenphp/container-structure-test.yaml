@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/GoogleContainerTools/container-structure-test/main/schema/v2/schema.json
+# 自前ビルドの FrankenPHP イメージの検査。版の一致はワークフローが別に検査する（ここには版を書かない）。
+schemaVersion: 2.0.0
+
+commandTests:
+  - name: frankenphp が起動できる
+    command: frankenphp
+    args: ['version']
+    exitCode: 0
+    expectedOutput: ['^FrankenPHP v\d+\.\d+\.\d+ PHP \d+\.\d+\.\d+ Caddy']
+
+  # 上流の Caddyfile を設定として読めること（モジュールの欠落や設定の非互換を起動前に拾う）。
+  - name: 同梱の Caddyfile が通る
+    command: frankenphp
+    args: ['validate', '--config', '/etc/frankenphp/Caddyfile', '--adapter', 'caddyfile']
+    exitCode: 0
+
+  - name: PHP が ZTS で組まれている
+    command: frankenphp
+    args: ['php-cli', '-r', 'exit(PHP_ZTS ? 0 : 1);']
+    exitCode: 0
+
+  # 1 ポート目を非 root で開けるよう上流が付けている capability。
+  - name: cap_net_bind_service が付いている
+    command: getcap
+    args: ['/usr/local/bin/frankenphp']
+    expectedOutput: ['cap_net_bind_service=ep']
+
+  - name: install-php-extensions がある
+    command: sh
+    args: ['-c', 'test -x /usr/local/bin/install-php-extensions']
+    exitCode: 0
+
+metadataTest:
+  entrypoint: ['docker-php-entrypoint']
+  cmd: ['--config', '/etc/frankenphp/Caddyfile', '--adapter', 'caddyfile']
+  exposedPorts: ['80', '443', '2019']
+  envVars:
+    - key: XDG_CONFIG_HOME
+      value: /config
+    - key: XDG_DATA_HOME
+      value: /data

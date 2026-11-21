@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/GoogleContainerTools/container-structure-test/main/schema/v2/schema.json
+# 自前ビルドの php イメージの検査。版の一致はワークフローが別に検査する（ここには版を書かない）。
+schemaVersion: 2.0.0
+
+commandTests:
+  # FrankenPHP は ZTS の libphp を前提にする。
+  - name: ZTS で組まれている
+    command: php
+    args: ['-r', 'exit(PHP_ZTS ? 0 : 1);']
+    exitCode: 0
+
+  - name: 公式イメージの既定の拡張が入っている
+    command: php
+    args: ['-m']
+    expectedOutput:
+      - '(?m)^curl$'
+      - '(?m)^openssl$'
+      - '(?m)^pdo_sqlite$'
+      - '(?m)^readline$'
+      - '(?m)^sodium$'
+      - '(?m)^zlib$'
+
+  # docker-php-ext-* が使えなければ下流の Dockerfile が拡張を足せない。
+  - name: docker-php-ext-install が動く
+    command: docker-php-ext-install
+    args: ['--help']
+    exitCode: 0
+    expectedOutput: ['usage:']
+
+fileExistenceTests:
+  # FrankenPHP は embed SAPI の libphp にリンクする。
+  - name: libphp
+    path: /usr/local/lib/libphp.so
+    shouldExist: true
+
+  # 上流のディレクトリを実行ビットごと取得できていること（落ちると COPY 後のスクリプトが実行できない）。
+  - name: docker-php-entrypoint
+    path: /usr/local/bin/docker-php-entrypoint
+    shouldExist: true
+    isExecutableBy: any
+  - name: docker-php-ext-enable
+    path: /usr/local/bin/docker-php-ext-enable
+    shouldExist: true
+    isExecutableBy: any
+  - name: docker-php-source
+    path: /usr/local/bin/docker-php-source
+    shouldExist: true
+    isExecutableBy: any
+
+metadataTest:
+  entrypoint: ['docker-php-entrypoint']
+  cmd: ['php', '-a']
