@@ -1,0 +1,18 @@
+{
+  "platforms": [
+    { "platform": "linux/amd64", "runner": "ubuntu-24.04" },
+    { "platform": "linux/arm64", "runner": "ubuntu-24.04-arm" }
+  ],
+  "frankenphp": {
+    "repository": "php/frankenphp",
+    "version": "v1.14.0",
+    "commit": "30c6bb778ebbb56d7dceb939993160210fba01b2"
+  },
+  "php": {
+    "8.6": {
+      "os": "trixie",
+      "officialTag": "8.6-cli-trixie",
+      "officialDigest": "sha256:d84acf3155d907afaa5afa9b9457c5f12016b6dc7ade84659f40cdc505cc087d"
+    }
+  }
+}

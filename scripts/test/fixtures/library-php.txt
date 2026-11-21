@@ -1,0 +1,16 @@
+# this file is generated via https://github.com/docker-library/php/blob/3b25f4162a9bd144d3f447d03cb8fe16c0d2c9cc/generate-stackbrew-library.sh
+
+Maintainers: Tianon Gravi <admwiggin@gmail.com> (@tianon),
+             Joseph Ferguson <yosifkit@gmail.com> (@yosifkit)
+GitRepo: https://github.com/docker-library/php.git
+
+Tags: 8.6.0-cli-trixie, 8.6-cli-trixie, 8-cli-trixie, cli-trixie, 8.6.0-trixie, 8.6-trixie, 8-trixie, trixie, 8.6.0-cli, 8.6-cli, 8-cli, cli, 8.6.0, 8.6, 8, latest
+Architectures: amd64, arm32v5, arm32v7, arm64v8, i386, ppc64le, riscv64, s390x
+GitCommit: 3b25f4162a9bd144d3f447d03cb8fe16c0d2c9cc
+Directory: 8.6/trixie/cli
+
+Tags: 8.5.13-zts-trixie, 8.5-zts-trixie, 8.5.13-zts, 8.5-zts
+Architectures: amd64, arm32v5, arm32v7, arm64v8, i386, ppc64le, riscv64, s390x
+GitCommit: 8f7cce49542f60a52d87a852a46a734cc1de78fc
+Directory: 8.5/trixie/zts
+
