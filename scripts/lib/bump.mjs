@@ -41,13 +41,28 @@ export function bumpAction({ needed, openPr }) {
   return { kind: 'create' };
 }
 
-// mergeable が UNKNOWN の間は polls 回まで読み直す。確定しなければ auto-merge を投げずに見届けに進む
-// （PR の状態が分からないまま auto-merge を有効にすると、マージ済みなどで失敗しうる。conflict は見届けが判定する）。
+// mergeable が UNKNOWN の間は polls 回まで読み直す。確定しなければ見届けに進む（conflict は見届けが判定する）。
+// そのとき最後に読んだ PR がキュー外で auto-merge が外れていれば有効にし直す（外れたままだと見届けが失敗する）。
+// マージ済みの PR は state の判定で先に拾われるので、残るのは有効化の直前にマージされる競合だけ（enableAutoMergeOrMerged）。
 export async function settleBumpAction({ needed, readPr, polls, wait }) {
-  let action = bumpAction({ needed, openPr: await readPr() });
+  let pr = await readPr();
+  let action = bumpAction({ needed, openPr: pr });
   for (let i = 0; action.kind === 'wait-mergeable' && i < polls; i += 1) {
     await wait();
-    action = bumpAction({ needed, openPr: await readPr() });
+    pr = await readPr();
+    action = bumpAction({ needed, openPr: pr });
   }
-  return action.kind === 'wait-mergeable' ? { kind: 'watch', pr: action.pr, enableAutoMerge: false } : action;
+  if (action.kind !== 'wait-mergeable') return action;
+  return { kind: 'watch', pr: action.pr, enableAutoMerge: pr.autoMergeRequest === null && !pr.isInMergeQueue };
+}
+
+// auto-merge を有効にする。失敗しても、読み直した PR がマージ済みならそれでよい（有効化の直前にマージされた）。
+export async function enableAutoMergeOrMerged({ enable, readPr }) {
+  try {
+    await enable();
+    return 'enabled';
+  } catch (e) {
+    if ((await readPr())?.state === 'MERGED') return 'merged';
+    throw e;
+  }
 }

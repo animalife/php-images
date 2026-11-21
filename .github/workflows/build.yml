@@ -25,7 +25,8 @@ on:
 permissions: {}
 
 concurrency:
-  # 夜のジョブ（最大 6 時間待つ）は版ごとに分け、普段のビルドを止めない。夜のジョブは公開しないので、
+  # 夜のジョブは版ごとに分け、普段のビルドを止めない（php.net を待つのが最大 5 時間 45 分、PR の見届けが最大 4 時間で、
+  # 同じ版の run がグループを占有するのは最大約 10 時間）。夜のジョブは公開しないので、
   # 公開するのは build グループの run だけで、これは commit 順に直列で走る。
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.php-version != '' && format('wait-{0}', inputs.php-version) || 'build' }}
   cancel-in-progress: false

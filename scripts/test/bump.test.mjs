@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bumpVersions, formatVersions, bumpBranch, bumpAction, settleBumpAction } from '../lib/bump.mjs';
+import { bumpVersions, formatVersions, bumpBranch, bumpAction, settleBumpAction, enableAutoMergeOrMerged } from '../lib/bump.mjs';
 
 const repoVersions = () => JSON.parse(readFileSync(new URL('../../versions.json', import.meta.url), 'utf8'));
 
@@ -87,16 +87,48 @@ test('settleBumpAction: UNKNOWN の間は読み直し、確定したらその判
   assert.deepEqual(action, { kind: 'recreate', pr: 7 });
 });
 
-test('settleBumpAction: 待つ間にマージされたら、auto-merge を投げずに見届けへ', async () => {
+// 捕まえる変異: settle のループで MERGED を判定しない（UNKNOWN のまま上限まで待ってから同じ値に落ちる）。
+// MERGED を見た時点で止まることを、待った回数で判別する。
+test('settleBumpAction: 待つ間にマージされたら、そこで止まって auto-merge を投げずに見届けへ', async () => {
+  let waits = 0;
   const readPr = states(prState({ mergeable: 'UNKNOWN' }), prState({ state: 'MERGED', mergeable: 'UNKNOWN', autoMergeRequest: null }));
-  const action = await settleBumpAction({ needed: true, readPr, polls: 10, wait: async () => {} });
+  const action = await settleBumpAction({ needed: true, readPr, polls: 10, wait: async () => { waits += 1; } });
   assert.deepEqual(action, { kind: 'watch', pr: 7, enableAutoMerge: false });
+  assert.equal(waits, 1);
 });
 
-test('settleBumpAction: UNKNOWN が確定しなければ、auto-merge を投げずに見届けへ（conflict は見届けが判定する）', async () => {
+test('settleBumpAction: UNKNOWN が確定しなければ見届けへ。auto-merge は付いていればそのまま', async () => {
   let waits = 0;
-  const readPr = states(prState({ mergeable: 'UNKNOWN', autoMergeRequest: null }));
+  const readPr = states(prState({ mergeable: 'UNKNOWN' }));
   const action = await settleBumpAction({ needed: true, readPr, polls: 3, wait: async () => { waits += 1; } });
   assert.deepEqual(action, { kind: 'watch', pr: 7, enableAutoMerge: false });
   assert.equal(waits, 3);
+});
+
+// 事件: 確定しないまま見届けに移るとき常に auto-merge を投げなかったので、auto-merge が外れた PR を dispatch し直すと、
+// 見届けが suspect を 3 回見て必ず失敗した。
+test('settleBumpAction: UNKNOWN が確定せず、キュー外で auto-merge が外れていれば有効にし直す', async () => {
+  const readPr = states(prState({ mergeable: 'UNKNOWN', autoMergeRequest: null }));
+  assert.deepEqual(await settleBumpAction({ needed: true, readPr, polls: 2, wait: async () => {} }), { kind: 'watch', pr: 7, enableAutoMerge: true });
+  const queued = states(prState({ mergeable: 'UNKNOWN', autoMergeRequest: null, isInMergeQueue: true }));
+  assert.deepEqual(await settleBumpAction({ needed: true, readPr: queued, polls: 2, wait: async () => {} }), { kind: 'watch', pr: 7, enableAutoMerge: false });
+});
+
+// 捕まえる変異: MERGED の判定を !needed の後ろに移す（needed=false で close を返して、マージ済みの PR を閉じに行く）。
+test('bumpAction: needed=false でも、マージ済みの PR は閉じずに見届けへ', () => {
+  assert.deepEqual(bumpAction({ needed: false, openPr: prState({ state: 'MERGED', mergeable: 'UNKNOWN', autoMergeRequest: null }) }), { kind: 'watch', pr: 7, enableAutoMerge: false });
+});
+
+// 捕まえる変異: CLOSED のときに needed を見ずに常に create を返す。
+test('bumpAction: 閉じられた PR は、上げる必要があれば作り直し、なければ何もしない', () => {
+  assert.deepEqual(bumpAction({ needed: true, openPr: prState({ state: 'CLOSED' }) }), { kind: 'create' });
+  assert.deepEqual(bumpAction({ needed: false, openPr: prState({ state: 'CLOSED' }) }), { kind: 'none' });
+});
+
+// 有効にする直前にマージされると enable は失敗する。読み直してマージ済みなら見届けに進む。
+test('enableAutoMergeOrMerged: enable が失敗しても、PR がマージ済みなら成功として扱う', async () => {
+  const fail = async () => { throw new Error('Pull request is in clean status'); };
+  assert.equal(await enableAutoMergeOrMerged({ enable: fail, readPr: async () => prState({ state: 'MERGED' }) }), 'merged');
+  await assert.rejects(enableAutoMergeOrMerged({ enable: fail, readPr: async () => prState({ state: 'OPEN' }) }), /clean status/);
+  assert.equal(await enableAutoMergeOrMerged({ enable: async () => {}, readPr: async () => null }), 'enabled');
 });

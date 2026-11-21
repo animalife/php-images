@@ -140,7 +140,8 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
    - main がまだその版未満で conflict した（同じ minor の digest 更新が先に入ったなど）ときは、同じ版で build.yml を
      dispatch し直して成功で終える。新しい run は php.net の確認がすぐ済み、bump が conflict した PR を閉じて最新の main から
      作り直す。作り直した直後などで PR の mergeable が計算中（UNKNOWN）なら、bump は確定するまで待って読み直す（15 秒おき、
-     最大 10 回。確定しなければ auto-merge は触らずに見届けに進む。待つ間にマージされた・閉じられた PR は state で見分ける）。立て直しは 3 回まで（`redispatch-count` で数える）で、上限に達したら失敗にする。新しい run が失敗したときに
+     最大 10 回。確定しなければ見届けに進み、auto-merge が外れていれば有効にし直す。待つ間にマージされた・閉じられた PR は
+     state で見分ける）。立て直しは 3 回まで（`redispatch-count` で数える）で、上限に達したら失敗にする。新しい run が失敗したときに
      人へ届くのは Issue だけ（下の「失敗したとき」）
 5. 公式イメージが 8.6.1 を出すと、Renovate が `officialDigest` を埋める PR を作り、push の run が official の Dockerfile で組み直す
 
@@ -150,7 +151,7 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
 - main の ruleset（必須チェックとマージキュー）が無いと auto-merge を有効にできず、その旨のエラーで失敗する。ruleset を入れてから使う
 - PR は専用の GitHub App のトークンで作る（GITHUB_TOKEN で作った PR では CI が起きないため）。コミットは署名が必須なので、
   git push ではなく GitHub が署名する API（createCommitOnBranch）で作る
-- 待機中も普段のビルドは止まらない（待つ run は版ごとに別の concurrency グループ）
+- 待機中も普段のビルドは止まらない（夜のジョブは版ごとに別の concurrency グループ。同じ版の run が占有するのは最大約 10 時間）
 
 ### 失敗したとき
 

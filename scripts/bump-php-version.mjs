@@ -1,5 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
-import { bumpBranch, bumpVersions, formatVersions, settleBumpAction } from './lib/bump.mjs';
+import { bumpBranch, bumpVersions, enableAutoMergeOrMerged, formatVersions, settleBumpAction } from './lib/bump.mjs';
 import { client, PR_BUMP_QUERY, prState } from './lib/github.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';
 
@@ -57,8 +57,10 @@ main(async () => {
   }
   if (action.kind === 'watch') {
     if (action.enableAutoMerge) {
-      await enableAutoMerge(openPr.id);
-      console.log(`PR #${action.pr} の auto-merge が外れていたので有効にし直した`);
+      const result = await enableAutoMergeOrMerged({ enable: () => enableAutoMerge(openPr.id), readPr });
+      console.log(result === 'merged'
+        ? `PR #${action.pr} は auto-merge を有効にする直前にマージされた`
+        : `PR #${action.pr} の auto-merge が外れていたので有効にし直した`);
     } else {
       console.log(`PHP ${version} の PR はすでにある: ${openPr.url}`);
     }
