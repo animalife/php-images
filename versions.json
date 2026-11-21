@@ -8,6 +8,15 @@
     "version": "v1.14.0",
     "commit": "30c6bb778ebbb56d7dceb939993160210fba01b2"
   },
+  "baseImages": {
+    "php": {
+      "debian:trixie-slim": "sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2"
+    },
+    "frankenphp": {
+      "docker/dockerfile:1": "sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183",
+      "golang:1.27-trixie": "sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d"
+    }
+  },
   "php": {
     "8.6": {
       "os": "trixie",

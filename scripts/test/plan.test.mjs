@@ -9,6 +9,10 @@ const base = () => ({
     { platform: 'linux/arm64', runner: 'ubuntu-24.04-arm' },
   ],
   frankenphp: { repository: 'php/frankenphp', version: 'v1.14.0', commit: 'a'.repeat(40) },
+  baseImages: {
+    php: { 'debian:trixie-slim': digest('7') },
+    frankenphp: { 'golang:1.27-trixie': digest('8'), 'docker/dockerfile:1': digest('9') },
+  },
   php: {
     '8.6': { os: 'trixie', officialTag: '8.6-cli-trixie', officialDigest: digest('1') },
     '8.5': { os: 'trixie', officialTag: '8.5-zts-trixie', officialDigest: digest('2') },
@@ -42,6 +46,10 @@ test('validateVersions は形式の崩れた値を弾く', () => {
     (v) => { v.php['8.5'].officialTag = '8.5-cli-trixie'; },
     (v) => { v.php = {}; },
     (v) => { v.platforms = []; },
+    (v) => { delete v.baseImages.frankenphp; },
+    (v) => { v.baseImages.php['debian:trixie-slim'] = 'trixie'; },
+    (v) => { v.baseImages.php.debian = digest('7'); },
+    (v) => { v.baseImages.php['debian:trixie-slim@sha256:x'] = digest('7'); },
     (v) => { v.platforms[0].platform = 'linux/arm/v7'; },
   ];
   for (const mutate of cases) {
@@ -98,6 +106,20 @@ test('push: platforms が変わったら全部ビルドする', () => {
   after.platforms = after.platforms.slice(0, 1);
   const plan = computePlan({ event: 'push', before: base(), after, changedFiles: ['versions.json'] });
   assert.deepEqual(versionsOf(plan), { php: ['8.5', '8.6'], frankenphp: ['8.5', '8.6'] });
+});
+
+test('push: php の親イメージの pin が変わったら php と frankenphp を全版ビルドする', () => {
+  const after = base();
+  after.baseImages.php['debian:trixie-slim'] = digest('6');
+  const plan = computePlan({ event: 'push', before: base(), after, changedFiles: ['versions.json'] });
+  assert.deepEqual(versionsOf(plan), { php: ['8.5', '8.6'], frankenphp: ['8.5', '8.6'] });
+});
+
+test('push: FrankenPHP の親イメージの pin だけが変わったら frankenphp だけ全版ビルドする', () => {
+  const after = base();
+  after.baseImages.frankenphp['golang:1.27-trixie'] = digest('6');
+  const plan = computePlan({ event: 'push', before: base(), after, changedFiles: ['versions.json'] });
+  assert.deepEqual(versionsOf(plan), { php: [], frankenphp: ['8.5', '8.6'] });
 });
 
 test('push: 変更前の設定が無い（初回 push・履歴が読めない）なら全部ビルドする', () => {

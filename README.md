@@ -34,6 +34,11 @@ php.net での公開からそのままパッチ入りのイメージを作るた
   8.6 以上は `<minor>-cli-<os>`、8.5 以下は `<minor>-zts-<os>`（上流の docker-bake.hcl の `php_base_variant` と同じ。
   食い違うとビルドが止まる）。`officialDigest` はそのタグの公式イメージの digest で、Renovate が更新する
 - `frankenphp`: 上流のタグと commit。Renovate が両方を同時に更新し、ビルドはタグが commit を指しているかを確かめる
+- `baseImages`: 上流の Dockerfile がタグだけで参照する親イメージ（docker-library/php の `FROM debian:trixie-slim`、
+  FrankenPHP の bake の `golang-base` や `# syntax=docker/dockerfile:1` など）の digest。`php` と `frankenphp` に分けて持つ。
+  上流の Dockerfile は書き換えず、名前付きコンテキスト（`--build-context` / bake の `contexts`）と `BUILDKIT_SYNTAX` で差し替える。
+  取得した Dockerfile や bake の定義が pin の無いイメージを参照していたらビルドを止める（上流が親イメージを変えたら、ここに足して直す）。
+  Renovate が digest だけを更新する
 - `platforms`: プラットフォームとランナー
 
 ### 版を足す
@@ -57,6 +62,7 @@ php.net での公開からそのままパッチ入りのイメージを作るた
 1. docker-library/php が更新されて公式イメージが出直すと、Renovate が `officialDigest` を更新する PR を作り、自動マージする
 2. main への push で、差分のあった版の php を docker-library/php の Dockerfile からビルドし、続けて FrankenPHP をビルドする
 3. FrankenPHP の pin だけが変わったときは php のビルドを飛ばし、現行の php イメージで FrankenPHP をビルドする
+4. `baseImages.php` が変わったら php と FrankenPHP を、`baseImages.frankenphp` だけなら FrankenPHP を全版ビルドし直す
 
 php の Dockerfile は、official-images の `library/php` で追うタグの `GitCommit` と `Directory` を引き、
 その commit の docker-library/php のディレクトリを取得して使う。ワークフローやスクリプトなどビルドの入力が変わった push では全版をビルドし直す。

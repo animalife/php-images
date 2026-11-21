@@ -34,6 +34,17 @@
             datasourceTemplate: 'docker',
         },
         {
+            description: 'versions.json の baseImages: 上流の Dockerfile がタグで参照する親イメージ（FROM・bake の docker-image コンテキスト・# syntax=）の digest',
+            customType: 'regex',
+            managerFilePatterns: [
+                '/^versions\\.json$/',
+            ],
+            matchStrings: [
+                '"(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>[A-Za-z0-9._-]+)": "(?<currentDigest>sha256:[0-9a-f]{64})"',
+            ],
+            datasourceTemplate: 'docker',
+        },
+        {
             description: 'versions.json の frankenphp: 上流のタグと commit を二重に固定する。新しいタグが出ると版と commit を同時に更新する',
             customType: 'regex',
             managerFilePatterns: [
@@ -90,12 +101,12 @@
             automerge: true,
         },
         {
-            description: 'php の追うタグは版ごとに固定（8.6-cli-trixie）なので、タグの更新（8.7 など）は提案させず digest だけを追う。系列を足すときは versions.json に手で版を足す',
-            matchManagers: [
-                'custom.regex',
+            description: 'versions.json の docker イメージ（php の追うタグ・親イメージ）はタグを固定して digest だけを追う。タグの更新（php の 8.7、golang の 1.28 など）は提案させない。上流が親イメージのタグを変えたらビルドが止まるので、そのとき手で直す',
+            matchFileNames: [
+                'versions.json',
             ],
-            matchDepNames: [
-                'php',
+            matchDatasources: [
+                'docker',
             ],
             matchUpdateTypes: [
                 'major',
@@ -105,12 +116,12 @@
             enabled: false,
         },
         {
-            description: 'php の digest 更新は即時・自動マージ（docker-library の更新を手放しで本番イメージへ届ける経路）。冷却は消費側の digest-cooldown が受け持つ',
-            matchManagers: [
-                'custom.regex',
+            description: 'versions.json の digest 更新は即時・自動マージ（docker-library の更新や親イメージの更新を手放しで本番イメージへ届ける経路）',
+            matchFileNames: [
+                'versions.json',
             ],
-            matchDepNames: [
-                'php',
+            matchDatasources: [
+                'docker',
             ],
             matchUpdateTypes: [
                 'digest',
@@ -122,7 +133,7 @@
             automerge: true,
         },
         {
-            description: 'FrankenPHP は即時に PR を作る。patch は自動マージ、minor 以上は挙動の変化を含みうるので手動。冷却は消費側が受け持つ',
+            description: 'FrankenPHP は即時に PR を作る。patch は自動マージ、minor 以上は挙動の変化を含みうるので手動',
             matchDatasources: [
                 'github-tags',
             ],

@@ -18,6 +18,14 @@ export function validateVersions(v) {
   if (fp.repository !== 'php/frankenphp') fail(`frankenphp.repository が php/frankenphp ではない: ${fp.repository}`);
   if (!/^v\d+\.\d+\.\d+$/.test(fp.version ?? '')) fail(`frankenphp.version が vX.Y.Z ではない: ${fp.version}`);
   if (!/^[0-9a-f]{40}$/.test(fp.commit ?? '')) fail(`frankenphp.commit が 40 桁の 16 進ではない: ${fp.commit}`);
+  for (const group of ['php', 'frankenphp']) {
+    const pins = v.baseImages?.[group];
+    if (pins === null || typeof pins !== 'object') fail(`baseImages.${group} が無い`);
+    for (const [ref, digest] of Object.entries(pins)) {
+      if (!/^[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+$/.test(ref)) fail(`baseImages.${group} のキーは <イメージ>:<タグ>: ${ref}`);
+      if (!/^sha256:[0-9a-f]{64}$/.test(digest ?? '')) fail(`baseImages.${group}.${ref} の digest が不正: ${digest}`);
+    }
+  }
   const minors = Object.keys(v.php ?? {});
   if (minors.length === 0) fail('php が空');
   for (const minor of minors) {
@@ -34,7 +42,6 @@ export function validateVersions(v) {
   }
 }
 
-// push でこれらが変わったら全版をビルドし直す（versions.json は版ごとに比べる）。
 const BUILD_INPUTS = [
   /^\.github\/workflows\/build\.yml$/,
   /^\.github\/actions\//,
@@ -60,7 +67,6 @@ function matrix(after, minors) {
   return { versions, publishes, builds };
 }
 
-// before: 変更前の versions.json（読めなければ null）、changedFiles: push で変わったファイル（不明なら null）。
 export function computePlan({ event, before = null, after, changedFiles = null, phpVersion = '' }) {
   validateVersions(after);
   const all = Object.keys(after.php);
@@ -86,8 +92,10 @@ export function computePlan({ event, before = null, after, changedFiles = null, 
       php = all;
       frankenphp = all;
     } else {
-      php = all.filter((m) => !same(before.php?.[m], after.php[m]));
-      frankenphp = same(before.frankenphp, after.frankenphp) ? php : all;
+      const phpBase = same(before.baseImages?.php, after.baseImages.php);
+      const fpBase = same(before.baseImages?.frankenphp, after.baseImages.frankenphp);
+      php = phpBase ? all.filter((m) => !same(before.php?.[m], after.php[m])) : all;
+      frankenphp = same(before.frankenphp, after.frankenphp) && fpBase ? php : all;
     }
   } else {
     throw new Error(`想定外のイベント: ${event}`);
