@@ -133,14 +133,15 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
 3. 以降は普段の経路: PR の CI（php.net の情報で差し替えた Dockerfile の smoke build を含む）→ マージ → main の push の run が公開する
 4. この run は PR がマージされるまで見届ける（watch-bump）。2 時間以内にマージされない・PR が閉じられた・チェックが失敗した・
    auto-merge が外れたまま（マージキューに入っていない状態が 3 回続けて見えた）ときは run を失敗にする。App が作った PR の失敗は
-   App にしか通知されないので、dispatch した人に届けるため。マージキューに入っている間は待つ。権限不足などの恒久的なエラーは
-   待たずに失敗にし、5xx やネットワークの一時的なエラーだけ再試行する
+   App にしか通知されないので、run の失敗と Issue に変えるため。マージキューに入っている間は待つ。権限不足などの恒久的な
+   エラーは待たずに失敗にし、5xx・rate limit（429 と、rate limit を示す 403）・ネットワークの一時的なエラーだけ再試行する
    - 閉じられた・conflict のときでも、main の `versions.json` がすでにその版以上なら（official が追いついて Renovate の
      patch PR が先にマージされたなど）成功にし、残った PR を閉じて枝を消す
    - main がまだその版未満で conflict した（同じ minor の digest 更新が先に入ったなど）ときは、同じ版で build.yml を
      dispatch し直して成功で終える。新しい run は php.net の確認がすぐ済み、bump が conflict した PR を閉じて最新の main から
-     作り直す。立て直しは 3 回まで（`redispatch-count` で数える）で、上限に達したら失敗にする。新しい run が失敗すれば、
-     その run の失敗として通知と Issue が出る
+     作り直す。作り直した直後などで PR の mergeable が計算中（UNKNOWN）なら、bump は確定するまで待って読み直す（15 秒おき、
+     最大 10 回）。立て直しは 3 回まで（`redispatch-count` で数える）で、上限に達したら失敗にする。新しい run が失敗したときに
+     人へ届くのは Issue だけ（下の「失敗したとき」）
 5. 公式イメージが 8.6.1 を出すと、Renovate が `officialDigest` を埋める PR を作り、push の run が official の Dockerfile で組み直す
 
 - main がすでに 8.6.1 以上なら何もせずに成功する。そのとき 8.6.1 の PR が開いていれば閉じて枝を消す（Renovate に先を越された夜の PR）
@@ -155,6 +156,10 @@ gh workflow run build.yml -R animalife/php-images -f php-version=8.6.1
 
 main の run でどれかのジョブが失敗・取り消しになると Issue を作る（同じタイトルの Issue が開いていればコメントを足す）。
 Issue は push・復旧と夜のジョブで分ける。
+
+人に確実に届くのはこの Issue だけで、リポジトリを Watch しておく前提にする。GitHub の run の失敗の通知は run を起動した
+actor にしか行かないので、人が直接 dispatch した run の失敗はその人に届くが、マージキュー経由の push の run（actor は
+マージした人や Renovate の bot）と、立て直しで起動した run（actor は GITHUB_TOKEN の bot）の失敗は、通知では届かない。
 
 - push か版を指定しない dispatch の失敗: 「build ワークフローが main で失敗している」。その後、push か版を指定しない dispatch の
   run が成功すると、コメントを残して閉じる

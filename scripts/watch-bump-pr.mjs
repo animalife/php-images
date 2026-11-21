@@ -4,7 +4,7 @@ import { client, PR_STATE_QUERY, prState } from './lib/github.mjs';
 import { assessPr, canRedispatch, needsMainCheck, nextSuspectCount } from './lib/publish.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';
 
-// 夜の PR がマージされるまで見届ける（dispatch した人に失敗の通知が届くように）。
+// 夜の PR がマージされるまで見届ける（PR の失敗を run の失敗と Issue に変えるため）。
 main(async () => {
   const repo = env('GITHUB_REPOSITORY');
   const [owner, name] = repo.split('/');

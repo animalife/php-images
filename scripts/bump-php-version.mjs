@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { bumpAction, bumpBranch, bumpVersions, formatVersions } from './lib/bump.mjs';
 import { client, PR_BUMP_QUERY, prState } from './lib/github.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';
@@ -15,11 +16,24 @@ main(async () => {
   const next = bumpVersions(JSON.parse(Buffer.from(file.content, 'base64').toString('utf8')), version);
 
   const open = await rest('GET', `/repos/${repo}/pulls?state=open&head=${encodeURIComponent(`${owner}:${branch}`)}`);
-  const openPr = open.length === 0 ? null : prState(await graphql(PR_BUMP_QUERY, { owner, name, number: open[0].number }));
-  const action = bumpAction({
+  const readPr = async () => (open.length === 0 ? null : prState(await graphql(PR_BUMP_QUERY, { owner, name, number: open[0].number })));
+  const decide = (pr) => bumpAction({
     needed: next !== null,
-    openPr: openPr && { number: open[0].number, mergeable: openPr.mergeable, autoMergeRequest: openPr.autoMergeRequest, isInMergeQueue: openPr.isInMergeQueue },
+    openPr: pr && { number: open[0].number, mergeable: pr.mergeable, autoMergeRequest: pr.autoMergeRequest, isInMergeQueue: pr.isInMergeQueue },
   });
+  let openPr = await readPr();
+  let action = decide(openPr);
+  // mergeable が UNKNOWN（計算中）なら、確定するまで 15 秒おきに最大 10 回読み直す。確定しなければ見届けに進み、
+  // 見届けの側で conflict を判定する。
+  for (let i = 0; action.kind === 'wait-mergeable' && i < 10; i += 1) {
+    await delay(15_000);
+    openPr = await readPr();
+    action = decide(openPr);
+  }
+  if (action.kind === 'wait-mergeable') {
+    console.log(`::notice::PR #${action.pr} の mergeable が確定しないので、見届けに進む`);
+    action = { kind: 'watch', pr: action.pr, enableAutoMerge: openPr.autoMergeRequest === null && !openPr.isInMergeQueue };
+  }
 
   async function deleteBranch() {
     if (await rest('GET', `/repos/${repo}/git/ref/heads/${branch}`, undefined, { allow404: true })) {

@@ -29,6 +29,8 @@ export function bumpBranch(version) {
 export function bumpAction({ needed, openPr }) {
   if (!needed) return openPr ? { kind: 'close', pr: openPr.number } : { kind: 'none' };
   if (openPr?.mergeable === 'CONFLICTING') return { kind: 'recreate', pr: openPr.number };
+  // UNKNOWN は GitHub が mergeable を計算中。確定するまで待って読み直す（呼び出し側で回数の上限を持つ）。
+  if (openPr?.mergeable === 'UNKNOWN') return { kind: 'wait-mergeable', pr: openPr.number };
   if (openPr) {
     // マージキューに入っている PR に auto-merge を投げ直さない（キューに入ると autoMergeRequest が消えうる）。
     return { kind: 'watch', pr: openPr.number, enableAutoMerge: openPr.autoMergeRequest === null && !openPr.isInMergeQueue };

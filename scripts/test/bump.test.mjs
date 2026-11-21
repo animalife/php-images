@@ -62,3 +62,9 @@ test('bumpAction: 既存の PR がマージキューに入っていれば auto-m
 test('bumpAction: 同じ版の PR が conflict なら、閉じてから main から作り直す', () => {
   assert.deepEqual(bumpAction({ needed: true, openPr: prState({ mergeable: 'CONFLICTING' }) }), { kind: 'recreate', pr: 7 });
 });
+
+// 作り直した直後などは mergeable が UNKNOWN（GitHub が計算中）。そのまま watch に進むと、後で conflict と分かって
+// 立て直しの回数を無駄に使う。確定するまで待って読み直す。
+test('bumpAction: 同じ版の PR の mergeable が UNKNOWN なら、確定するまで待つ', () => {
+  assert.deepEqual(bumpAction({ needed: true, openPr: prState({ mergeable: 'UNKNOWN' }) }), { kind: 'wait-mergeable', pr: 7 });
+});

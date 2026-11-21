@@ -184,7 +184,7 @@ jobs:
         run: node scripts/bump-php-version.mjs
 
   # 夜の PR がマージされるまで見届ける。PR の CI の失敗、キューから外れた、conflict、閉じられた、期限（2 時間）切れなら
-  # この run を失敗にする。App が作った PR の失敗は App にしか通知されないので、dispatch した人に届けるため。
+  # この run を失敗にする。App が作った PR の失敗は App にしか通知されないので、run の失敗と Issue（failure-issue）に変えるため。
   # 読むだけなので App のトークンは渡さず GITHUB_TOKEN を使う。
   watch-bump:
     name: Watch the version bump PR
