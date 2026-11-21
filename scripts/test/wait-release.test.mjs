@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { finishWait, waitForRelease } from '../lib/php-release.mjs';
+import { checkWaitTarget, finishWait, waitForRelease } from '../lib/php-release.mjs';
 
 const released = { version: '8.6.1', source: [{ filename: 'php-8.6.1.tar.xz', sha256: 'b'.repeat(64) }] };
 const unknown = { error: 'Unknown version' };
@@ -87,4 +87,15 @@ test('finishWait: 公開されていればリリース情報を返し、期限�
   assert.deepEqual(finishWait({ status: 'found', release: released }, '8.6.1'), released);
   assert.throws(() => finishWait({ status: 'timeout' }, '8.6.1'), /期限までに公開されなかった/);
   assert.throws(() => finishWait({ status: 'error', message: 'bad' }, '8.6.1'), /bad/);
+});
+
+// 版の打ち間違い（8.6.11 のつもりで 8.6.1、8.6.2 のつもりで 8.6.20 など）を、約 6 時間待ってから知らないため。
+test('checkWaitTarget: 現行の移動タグより大きく、+3 パッチ以内の版だけを受け付ける', () => {
+  assert.doesNotThrow(() => checkWaitTarget('8.6.1', '8.6.0'));
+  assert.doesNotThrow(() => checkWaitTarget('8.6.3', '8.6.0'));
+  assert.throws(() => checkWaitTarget('8.6.4', '8.6.0'), /3/);
+  assert.throws(() => checkWaitTarget('8.6.0', '8.6.0'), /大きく/);
+  assert.throws(() => checkWaitTarget('8.6.0', '8.6.1'), /大きく/);
+  assert.throws(() => checkWaitTarget('8.7.0', '8.6.1'), /minor/);
+  assert.doesNotThrow(() => checkWaitTarget('8.6.9', null));
 });

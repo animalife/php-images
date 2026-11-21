@@ -1,0 +1,17 @@
+# aqua - Declarative CLI Version Manager
+# https://aquaproj.github.io/
+# CI（ci.yml）でしか使わないツール。build.yml のビルド入力から外すため、.github/aqua.yaml と分けている。
+# 版を変えたら `AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua update-checksum --prune` で aqua-checksums.json を作り直す
+# （-a はグローバル設定のパッケージまで書き込むので付けない）
+# （require_checksum のため、checksum が無い版は CI で入らない）。
+checksum:
+  enabled: true
+  require_checksum: true
+  supported_envs:
+    - all
+registries:
+  - type: standard
+    ref: v4.590.0 # renovate: depName=aquaproj/aqua-registry
+packages:
+  - name: jdx/jactionlint@v2.6.0
+  - name: zizmorcore/zizmor@v1.32.0

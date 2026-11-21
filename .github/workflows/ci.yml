@@ -25,7 +25,7 @@ jobs:
     permissions:
       contents: read # checkout に必要
     env:
-      AQUA_CONFIG: .github/aqua.yaml
+      AQUA_CONFIG: .github/aqua-ci/aqua.yaml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -74,10 +74,12 @@ jobs:
 
   # 上流の Dockerfile と bake の定義が、versions.json の baseImages に無い親イメージを参照していないかを
   # build.yml と同じ手順で確かめる。FrankenPHP の更新で上流が GO_VERSION を上げた場合などを、マージ前に止める。
+  # あわせて php を amd64 で push せずにビルドする（action や BuildKit の更新が、公開権限を持つ main の run で
+  # 初めて動くことにならないように）。必須チェックと食い違わないよう paths では絞らない。
   check-base-images:
-    name: check base images
+    name: check base images and smoke build php
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 40
     permissions:
       contents: read # checkout に必要
     steps:
@@ -92,7 +94,14 @@ jobs:
 
       - name: Read FrankenPHP pin
         id: fp
-        run: echo "commit=$(jq -r .frankenphp.commit versions.json)" >> "${GITHUB_OUTPUT}"
+        run: |
+          set -euo pipefail
+          commit="$(jq -er .frankenphp.commit versions.json)"
+          if ! [[ "${commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::versions.json の frankenphp.commit が不正: '${commit}'"
+            exit 1
+          fi
+          echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Checkout php/frankenphp
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -102,7 +111,12 @@ jobs:
           path: frankenphp
           persist-credentials: false
 
-      - name: Check php and FrankenPHP
+      # build.yml と同じ BuildKit で組む（BuildKit の更新もここで通す）。
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.2@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+
+      - name: Check php and FrankenPHP, smoke build php
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -110,7 +124,9 @@ jobs:
           gh api repos/docker-library/official-images/contents/library/php \
             -H 'Accept: application/vnd.github.raw+json' > "${RUNNER_TEMP}/library-php"
           out="${RUNNER_TEMP}/out"
-          for minor in $(jq -r '.php | keys[]' versions.json); do
+          # コマンド置換の中の jq の失敗は for では拾えないので、先に変数へ取って検査する。
+          minors="$(jq -er '.php | keys[]' versions.json)"
+          for minor in ${minors}; do
             tag="$(jq -r --arg m "${minor}" '.php[$m].officialTag' versions.json)"
             os="$(jq -r --arg m "${minor}" '.php[$m].os' versions.json)"
             echo "::group::php ${minor}（${tag}）"
@@ -121,10 +137,22 @@ jobs:
             src="${RUNNER_TEMP}/php-${minor}"
             git init -q "${src}"
             git -C "${src}" fetch -q --depth 1 https://github.com/docker-library/php.git "${commit}"
-            git -C "${src}" checkout -q FETCH_HEAD -- "${directory}/Dockerfile"
-            GITHUB_OUTPUT=/dev/null KIND=php DOCKERFILE="${src}/${directory}/Dockerfile" node scripts/pin-base-images.mjs
+            git -C "${src}" checkout -q FETCH_HEAD -- "${directory}"
+            : > "${out}"
+            GITHUB_OUTPUT="${out}" KIND=php DOCKERFILE="${src}/${directory}/Dockerfile" node scripts/pin-base-images.mjs
+            pin_json="$(sed -n 's/^args=//p' "${out}")"
+            pin_count="$(sed -n 's/^count=//p' "${out}")"
+            mapfile -t pin_args < <(jq -r '.[]' <<< "${pin_json}")
+            if [ "${#pin_args[@]}" -ne "${pin_count}" ]; then
+              echo "::error::親イメージの pin の引数が ${#pin_args[@]} 個で、${pin_count} 個ではない"
+              exit 1
+            fi
             # 待機の経路で差し替える 3 行が上流の現物にあるか（RELEASE_FILE が空なら読むだけ）。
             GITHUB_OUTPUT=/dev/null DOCKERFILE="${src}/${directory}/Dockerfile" RELEASE_FILE='' node scripts/rewrite-php-dockerfile.mjs
+            echo "::endgroup::"
+            echo "::group::smoke build php ${minor}（linux/amd64、push しない）"
+            docker buildx build "${src}/${directory}" "${pin_args[@]}" --platform linux/amd64 --pull --provenance=false \
+              --output type=cacheonly
             echo "::endgroup::"
             echo "::group::frankenphp ${minor}"
             target="runner-php-${minor//./-}-${os}"

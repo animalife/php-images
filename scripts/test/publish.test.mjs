@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pinsStale, decidePublish, tagsToApply, choosePhpBase, runVersions, pushTargetVersion, upstreamCommitOf } from '../lib/publish.mjs';
+import { pinsStale, decidePublish, tagsToApply, choosePhpBase, runVersions, pushTargetVersion, upstreamCommitOf, mustLandFor, canRedispatch } from '../lib/publish.mjs';
 
 const digest = (c) => `sha256:${c.repeat(64)}`;
 const versions = () => ({
@@ -170,4 +170,35 @@ test('upstreamCommitOf: ラベルから上流の commit を読み、無ければ
   assert.equal(upstreamCommitOf(img({ 'dev.animalife.php-images.upstream-commit': commit('c') })), commit('c'));
   assert.equal(upstreamCommitOf(img({})), null);
   assert.equal(upstreamCommitOf(null), null);
+});
+
+// 再実行（Re-run）した run には「後続の run が組み直す」前提が成り立たないので、skip で緑にせず失敗させる。
+test('mustLandFor: 待機 run と再実行した run は移動タグに載せられなければ失敗', () => {
+  assert.equal(mustLandFor('wait', '1'), true);
+  assert.equal(mustLandFor('push', '1'), false);
+  assert.equal(mustLandFor('push', '2'), true);
+  assert.throws(() => mustLandFor('push', ''), /RUN_ATTEMPT/);
+});
+
+// 待機 run が公開の時点で古い pin と判定されたら、同じ版で dispatch し直す（新しい run は main の新しい pin で組む）。
+// 起動し直しが続いてループしないよう、回数に上限を置く。
+test('canRedispatch: 待機 run だけが、上限（3 回）まで起動し直せる', () => {
+  assert.equal(canRedispatch('wait', '0'), true);
+  assert.equal(canRedispatch('wait', '2'), true);
+  assert.equal(canRedispatch('wait', '3'), false);
+  assert.equal(canRedispatch('push', '0'), false);
+  assert.throws(() => canRedispatch('wait', 'x'), /回数/);
+});
+
+test('待機 run: 古い pin なら起動し直し、上限に達していれば失敗', () => {
+  assert.equal(decidePublish({ current: { php: '8.6.0' }, candidate: { php: '8.6.1' }, mustLand: true, stale: true, redispatch: true }), 'redispatch');
+  assert.throws(() => decidePublish({ current: { php: '8.6.0' }, candidate: { php: '8.6.1' }, mustLand: true, stale: true, redispatch: false }), /古い/);
+  assert.deepEqual(tagsToApply('redispatch', 'ghcr.io/x/php', { fixed: 'a', moving: 'b' }), []);
+});
+
+// conflict は pin を新しくしても直らないので、起動し直さずに失敗させる。
+test('待機 run: 版の一方が下がるときは起動し直さない', () => {
+  assert.throws(() => decidePublish({
+    current: { php: '8.6.0', frankenphp: 'v1.14.1' }, candidate: { php: '8.6.1', frankenphp: 'v1.14.0' }, mustLand: true, stale: false, redispatch: true,
+  }), /一方/);
 });

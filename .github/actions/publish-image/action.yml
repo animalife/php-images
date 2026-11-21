@@ -33,8 +33,12 @@ inputs:
     description: PHP の minor（versions.json の php のキー）
     required: true
   run-kind:
-    description: wait（版を指定した待機 run。移動タグに載せられなければ失敗）/ push
+    description: wait（版を指定した待機 run）/ push。待機 run と再実行した run は、移動タグに載せられなければ失敗する
     required: true
+  redispatch-count:
+    description: この待機 run までに起動し直した回数（scripts/lib/publish.mjs の MAX_REDISPATCH まで起動し直す）
+    required: false
+    default: '0'
   run-versions-file:
     description: この run がビルドに使った versions.json
     required: true
@@ -44,7 +48,7 @@ outputs:
     description: 公開した index の digest
     value: ${{ steps.index.outputs.digest }}
   decision:
-    description: タグの判定（move / keep / skip）
+    description: タグの判定（move / keep / skip / redispatch）
     value: ${{ steps.tags.outputs.decision }}
   php-version:
     description: 公開した index の PHP の版
@@ -116,6 +120,8 @@ runs:
         INDEX_DIGEST: ${{ steps.index.outputs.digest }}
         MINOR: ${{ inputs.minor }}
         RUN_KIND: ${{ inputs.run-kind }}
+        RUN_ATTEMPT: ${{ github.run_attempt }}
+        REDISPATCH_COUNT: ${{ inputs.redispatch-count }}
         RUN_VERSIONS_FILE: ${{ inputs.run-versions-file }}
         MAIN_VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
         LIBRARY_FILE: ${{ runner.temp }}/library-php-now
@@ -135,6 +141,9 @@ runs:
         for r in "${refs[@]}"; do args+=(-t "${r}"); done
         if [ "${#args[@]}" -gt 0 ]; then
           docker buildx imagetools create "${args[@]}" "${IMAGE}@${INDEX_DIGEST}"
+        elif [ "${DECISION}" != "skip" ] && [ "${DECISION}" != "redispatch" ]; then
+          echo "::error::判定は ${DECISION} なのに付けるタグが無い"
+          exit 1
         fi
         {
           echo "### ${IMAGE}"

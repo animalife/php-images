@@ -37,4 +37,5 @@ main(async () => {
   }
   console.log(JSON.stringify(args, null, 2));
   setOutput('args', args);
+  setOutput('count', String(args.length));
 });

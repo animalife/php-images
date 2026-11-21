@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { findTag } from './lib/official-images.mjs';
-import { decidePublish, pinsStale, tagsToApply, upstreamCommitOf } from './lib/publish.mjs';
+import { canRedispatch, decidePublish, mustLandFor, pinsStale, tagsToApply, upstreamCommitOf } from './lib/publish.mjs';
 import { inspectImage } from './lib/registry.mjs';
 import { currentFromImage, frankenphpTags, phpTags } from './lib/tags.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';
@@ -44,9 +44,17 @@ main(async () => {
   const latest = findTag(readFileSync(env('LIBRARY_FILE'), 'utf8'), env('OFFICIAL_TAG')).gitCommit;
   const commits = { candidate: built.commit, current: now?.commit ?? null, latest };
   const stale = pinsStale(readJson(env('RUN_VERSIONS_FILE')), readJson(env('MAIN_VERSIONS_FILE')), kind, minor);
-  const decision = decidePublish({ current, candidate, mustLand: runKind === 'wait', stale, commits });
+  const decision = decidePublish({
+    current,
+    candidate,
+    mustLand: mustLandFor(runKind, env('RUN_ATTEMPT')),
+    stale,
+    commits,
+    redispatch: canRedispatch(runKind, env('REDISPATCH_COUNT')),
+  });
   const detail = `現行 ${JSON.stringify(current)}、今回 ${JSON.stringify(candidate)}`;
   if (decision === 'skip') console.log(`::warning::タグを付けない（pin が main の先端より古い、または同じ版を新しい上流の Dockerfile で組んだものが移動タグにある）。${detail} ${JSON.stringify(commits)}`);
+  if (decision === 'redispatch') console.log(`::warning::この run の pin は main の先端より古いので、タグを付けずに同じ版で dispatch し直す。${detail}`);
   if (decision === 'keep') console.log(`::warning::移動タグ ${tags.moving} は現行の方が新しいので動かさない（${detail}）`);
   const refs = tagsToApply(decision, image, tags);
   console.log(JSON.stringify({ decision, refs, candidate, current, stale }));

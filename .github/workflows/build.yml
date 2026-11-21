@@ -16,6 +16,11 @@ on:
         required: false
         type: string
         default: ''
+      redispatch-count:
+        description: '待機 run が古い pin のために起動し直された回数（自動で付く。手で dispatch するときは 0 のまま）'
+        required: false
+        type: string
+        default: '0'
 
 permissions: {}
 
@@ -39,6 +44,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read # checkout に必要
+      actions: read # 最後に成功した push run を探すのに必要
     outputs:
       phpVersions: ${{ steps.plan.outputs.phpVersions }}
       phpBuilds: ${{ steps.plan.outputs.phpBuilds }}
@@ -49,6 +55,7 @@ jobs:
       frankenphpCommit: ${{ steps.plan.outputs.frankenphpCommit }}
       platformCount: ${{ steps.plan.outputs.platformCount }}
       waitFor: ${{ steps.plan.outputs.waitFor }}
+      redispatchCount: ${{ steps.plan.outputs.redispatchCount }}
     steps:
       # dispatch した ref の workflow ファイルが実行されるので、ブランチ上で外せば素通りできる
       # （強制力のある境界ではなく誤操作のガード）。skip ではなく失敗にして誤 ref に気付けるようにする。
@@ -69,12 +76,27 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
+      # push の差分の基準は event.before ではなく、最後に成功した push run の head_sha にする。
+      # event.before だと、失敗した run の変更が後続の push で拾われず、自然には直らない。dispatch の run は混ぜない。
+      - name: Find the last successful push run
+        id: base
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sha="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/runs?branch=main&event=push&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // ""')"
+          echo "最後に成功した push run: ${sha:-（無い。全部ビルドする）}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
       - name: Plan
         id: plan
         env:
           EVENT_NAME: ${{ github.event_name }}
           PHP_VERSION_INPUT: ${{ inputs.php-version }}
-          BEFORE_SHA: ${{ github.event.before }}
+          REDISPATCH_COUNT_INPUT: ${{ inputs.redispatch-count }}
+          BEFORE_SHA: ${{ steps.base.outputs.sha }}
         run: node scripts/plan.mjs
 
       - name: Verify FrankenPHP tag points at the pinned commit
@@ -88,6 +110,7 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: read # checkout に必要
+      packages: read # 移動タグの php の版を読むのに必要
     outputs:
       found: ${{ steps.wait.outputs.found }}
       frankenphpVersion: ${{ steps.pin.outputs.version }}
@@ -101,6 +124,21 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 版の打ち間違いを、待ち始める前に止める（移動タグより大きく、+3 パッチ以内）。起動し直した run では、
+      # 前の run が php の移動タグをすでに動かしていることがあるので確かめない（版は最初の run で確かめ済み）。
+      - name: Check the requested version
+        if: ${{ needs.plan.outputs.redispatchCount == '0' }}
+        env:
+          PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
+          OFFICIAL_TAG: ${{ fromJSON(needs.plan.outputs.phpPublishes)[0].officialTag }}
+        run: node scripts/check-wait-target.mjs
 
       # 期限は job の timeout-minutes より手前に置き、未公開なら自分で失敗させて理由を残す。
       - name: Wait
@@ -137,7 +175,7 @@ jobs:
           name: versions-snapshot
           path: ${{ runner.temp }}/run-versions.json
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
       - name: Upload release info
         if: ${{ steps.wait.outputs.found == 'true' }}
@@ -146,7 +184,7 @@ jobs:
           name: php-release
           path: ${{ runner.temp }}/php-release.json
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   # 両アーキを同じ Dockerfile でビルドするため、取得と差し替えは版ごとに 1 回だけ行い、コンテキストを配る。
   php-prepare:
@@ -254,6 +292,7 @@ jobs:
           PHP_VERSION: ${{ steps.rewrite.outputs.phpVersion }}
           OVERRIDDEN: ${{ steps.rewrite.outputs.overridden }}
           PIN_ARGS: ${{ steps.pin.outputs.args }}
+          PIN_COUNT: ${{ steps.pin.outputs.count }}
         run: |
           set -euo pipefail
           out="${RUNNER_TEMP}/php-context"
@@ -261,8 +300,8 @@ jobs:
           tar -C "${DIRECTORY}" -cf "${out}/context.tar" .
           jq -n --arg phpVersion "${PHP_VERSION}" --arg gitCommit "${GIT_COMMIT}" \
             --arg directory "${UPSTREAM_DIRECTORY}" --arg overridden "${OVERRIDDEN}" \
-            --argjson pinArgs "${PIN_ARGS}" \
-            '{$phpVersion, $gitCommit, $directory, $overridden, $pinArgs}' > "${out}/meta.json"
+            --argjson pinArgs "${PIN_ARGS}" --argjson pinCount "${PIN_COUNT}" \
+            '{$phpVersion, $gitCommit, $directory, $overridden, $pinArgs, $pinCount}' > "${out}/meta.json"
           cat "${out}/meta.json"
           {
             echo "### php ${VERSION}"
@@ -276,7 +315,7 @@ jobs:
           name: php-context-${{ matrix.version }}
           path: ${{ runner.temp }}/php-context/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   php-build:
     name: Build php ${{ matrix.slug }}
@@ -284,7 +323,8 @@ jobs:
     if: ${{ !cancelled() && needs.php-prepare.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    # main に限るデプロイブランチの制限で、ブランチから dispatch した run が GHCR のタグや digest を書けないようにする。
+    # 誤操作のガード: main に限るデプロイブランチの制限で、ブランチから dispatch した run の公開を止める。
+    # 書き込み権限者がブランチ上でこの行を外せば素通りできるので、境界ではない（境界は消費側の attestation の検証）。
     environment: ghcr-publish
     permissions:
       packages: write # push-by-digest に必要
@@ -321,10 +361,12 @@ jobs:
           mkdir -p "${ctx}/src"
           tar -C "${ctx}/src" -xf "${ctx}/context.tar"
           meta="${ctx}/meta.json"
+          # jq が失敗しても mapfile は空の配列で続くので、pin-base-images が出した数と突き合わせる
+          # （pin が黙って外れないように。上流が親をすべて digest で書けば、正当に 0 個になる）。
+          expected="$(jq -er .pinCount "${meta}")"
           mapfile -t pin_args < <(jq -r '.pinArgs[]' "${meta}")
-          # jq が失敗しても mapfile は空の配列で続くので、空なら止める（pin が黙って外れないように）。
-          if [ "${#pin_args[@]}" -eq 0 ]; then
-            echo "::error::親イメージの pin の引数が空"
+          if [ "${#pin_args[@]}" -ne "${expected}" ]; then
+            echo "::error::親イメージの pin の引数が ${#pin_args[@]} 個で、${expected} 個ではない"
             exit 1
           fi
           docker buildx build "${ctx}/src" \
@@ -354,7 +396,7 @@ jobs:
           name: php-unverified-${{ matrix.slug }}
           path: ${{ runner.temp }}/digest/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   # 外部製の container-structure-test に packages: write のトークンを渡さないよう、ビルドとは別ジョブにする。
   php-test:
@@ -419,7 +461,7 @@ jobs:
           name: php-verified-${{ matrix.slug }}
           path: ${{ runner.temp }}/digest/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   php-publish:
     name: Publish php ${{ matrix.version }}
@@ -428,11 +470,15 @@ jobs:
     if: ${{ !cancelled() && needs.php-test.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      # 待機 run は版が 1 つなので、matrix の出力が上書きされることはない。
+      redispatch: ${{ steps.publish.outputs.decision == 'redispatch' }}
     concurrency:
       group: publish-php-${{ matrix.version }}
       cancel-in-progress: false
       queue: max
-    # main に限るデプロイブランチの制限で、ブランチから dispatch した run が GHCR のタグや digest を書けないようにする。
+    # 誤操作のガード: main に限るデプロイブランチの制限で、ブランチから dispatch した run の公開を止める。
+    # 書き込み権限者がブランチ上でこの行を外せば素通りできるので、境界ではない（境界は消費側の attestation の検証）。
     environment: ghcr-publish
     permissions:
       contents: read # checkout に必要
@@ -490,6 +536,7 @@ jobs:
           run-kind: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
           run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || 'versions.json' }}
           minor: ${{ matrix.version }}
+          redispatch-count: ${{ needs.plan.outputs.redispatchCount }}
 
       # FrankenPHP のビルドが php-base を決めるのに使う（scripts/lib/publish.mjs の choosePhpBase）。
       - name: Save publish record
@@ -508,7 +555,7 @@ jobs:
           name: php-digest-${{ matrix.version }}
           path: ${{ runner.temp }}/php-digest/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   # 両アーキを同じ php の上に組むため、php-base は版ごとに 1 回だけ決めて配る（移動タグをアーキごとに読むと、
   # その間に別の run が移動タグを動かしたとき、アーキで違う php の上に組まれる）。
@@ -517,7 +564,8 @@ jobs:
     needs: [plan, wait, php-publish]
     # php のジョブが skipped（FrankenPHP の pin だけの更新）でも走らせる。
     # needs だけだと依存先が skipped のとき後続も skipped になる。
-    if: ${{ !failure() && !cancelled() && needs.plan.outputs.frankenphpBuilds != '[]' && (needs.wait.result == 'skipped' || needs.wait.outputs.found == 'true') }}
+    # php を起動し直しに回したときは、FrankenPHP も起動し直した run に任せる。
+    if: ${{ !failure() && !cancelled() && needs.plan.outputs.frankenphpBuilds != '[]' && (needs.wait.result == 'skipped' || needs.wait.outputs.found == 'true') && needs.php-publish.outputs.redispatch != 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -566,7 +614,7 @@ jobs:
           name: php-base-${{ matrix.version }}
           path: ${{ runner.temp }}/php-base/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   frankenphp-build:
     name: Build frankenphp ${{ matrix.slug }}
@@ -668,13 +716,14 @@ jobs:
           # 上流 docker-bake.hcl の secret に渡る。
           GITHUB_TOKEN: ${{ github.token }}
           PIN_ARGS: ${{ steps.bake.outputs.args }}
+          PIN_COUNT: ${{ steps.bake.outputs.count }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
         working-directory: frankenphp
         run: |
           set -euo pipefail
           mapfile -t pin_args < <(jq -r '.[]' <<< "${PIN_ARGS}")
-          if [ "${#pin_args[@]}" -eq 0 ]; then
-            echo "::error::親イメージの pin の引数が空"
+          if [ "${#pin_args[@]}" -ne "${PIN_COUNT}" ]; then
+            echo "::error::親イメージの pin の引数が ${#pin_args[@]} 個で、${PIN_COUNT} 個ではない"
             exit 1
           fi
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
@@ -712,7 +761,7 @@ jobs:
           name: frankenphp-oci-${{ matrix.slug }}
           path: ${{ runner.temp }}/oci/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 3
 
   frankenphp-push:
     name: Push frankenphp ${{ matrix.slug }}
@@ -720,7 +769,8 @@ jobs:
     if: ${{ !cancelled() && needs.frankenphp-build.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # main に限るデプロイブランチの制限で、ブランチから dispatch した run が GHCR のタグや digest を書けないようにする。
+    # 誤操作のガード: main に限るデプロイブランチの制限で、ブランチから dispatch した run の公開を止める。
+    # 書き込み権限者がブランチ上でこの行を外せば素通りできるので、境界ではない（境界は消費側の attestation の検証）。
     environment: ghcr-publish
     permissions:
       packages: write # push-by-digest に必要
@@ -762,7 +812,7 @@ jobs:
           name: frankenphp-unverified-${{ matrix.slug }}
           path: ${{ runner.temp }}/digest/
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   frankenphp-test:
     name: Test frankenphp ${{ matrix.slug }}
@@ -828,7 +878,7 @@ jobs:
           name: frankenphp-verified-${{ matrix.slug }}
           path: ${{ runner.temp }}/digest/${{ matrix.slug }}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   frankenphp-publish:
     name: Publish frankenphp ${{ matrix.version }}
@@ -836,11 +886,14 @@ jobs:
     if: ${{ !cancelled() && needs.frankenphp-test.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      redispatch: ${{ steps.publish.outputs.decision == 'redispatch' }}
     concurrency:
       group: publish-frankenphp-${{ matrix.version }}
       cancel-in-progress: false
       queue: max
-    # main に限るデプロイブランチの制限で、ブランチから dispatch した run が GHCR のタグや digest を書けないようにする。
+    # 誤操作のガード: main に限るデプロイブランチの制限で、ブランチから dispatch した run の公開を止める。
+    # 書き込み権限者がブランチ上でこの行を外せば素通りできるので、境界ではない（境界は消費側の attestation の検証）。
     environment: ghcr-publish
     permissions:
       contents: read # checkout に必要
@@ -883,6 +936,7 @@ jobs:
           path: ${{ runner.temp }}/snapshot
 
       - name: Publish
+        id: publish
         uses: $/.github/actions/publish-image
         with:
           image: ${{ env.FRANKENPHP_IMAGE }}
@@ -896,3 +950,67 @@ jobs:
           run-kind: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
           run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || 'versions.json' }}
           minor: ${{ matrix.version }}
+          redispatch-count: ${{ needs.plan.outputs.redispatchCount }}
+
+  # 待機 run が公開の時点で古い pin と判定されたら、同じ版で build.yml を dispatch し直す。新しい run は main の新しい pin で
+  # 組み、php.net にはもう版が出ているのですぐビルドに入る。回数の上限は scripts/lib/publish.mjs の MAX_REDISPATCH。
+  # GITHUB_TOKEN による workflow_dispatch は新しい run を作れる（GITHUB_TOKEN のイベントで workflow が起きない規則の例外）。
+  redispatch:
+    name: Redispatch with the latest pins
+    needs: [plan, php-publish, frankenphp-publish]
+    if: ${{ always() && github.ref == 'refs/heads/main' && (needs.php-publish.outputs.redispatch == 'true' || needs.frankenphp-publish.outputs.redispatch == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write # workflow_dispatch に必要
+    steps:
+      - name: Dispatch build.yml again
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
+          COUNT: ${{ needs.plan.outputs.redispatchCount }}
+        run: |
+          set -euo pipefail
+          next=$((COUNT + 1))
+          gh workflow run build.yml --repo "${GITHUB_REPOSITORY}" --ref main -f php-version="${PHP_VERSION}" -f redispatch-count="${next}"
+          echo "::notice::pin が main の先端より古かったので、PHP ${PHP_VERSION} を新しい pin で組む run を起動し直した（${next} 回目）。結果は新しい run で確かめる"
+          {
+            echo "### 起動し直した"
+            echo ""
+            echo "pin が main の先端より古かったので、PHP ${PHP_VERSION} を新しい pin で組む run を起動し直した（${next} 回目）。"
+            echo "この run はタグを付けていない。結果は Actions の一覧にある新しい run で確かめる。"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # 失敗の通知は run を起動した actor にしか届かず、Renovate の自動マージやマージキュー経由の run では人に届く保証が無い。
+  # main の run でどれかのジョブが failure / cancelled になったら Issue に残す。同じ原因で乱立しないよう、
+  # 開いている同名の Issue があればコメントを足すだけにする。
+  notify-failure:
+    name: Notify failure
+    needs: [plan, wait, php-prepare, php-build, php-test, php-publish, frankenphp-prepare, frankenphp-build, frankenphp-push, frankenphp-test, frankenphp-publish, redispatch]
+    if: ${{ always() && github.ref == 'refs/heads/main' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write # Issue の作成とコメントに必要
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          PHP_VERSION_INPUT: ${{ inputs.php-version }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          title="build ワークフローが main で失敗している"
+          failed="$(jq -r 'to_entries[] | select(.value.result == "failure" or .value.result == "cancelled") | "- \(.key): \(.value.result)"' <<< "${RESULTS}")"
+          body="$(printf '%s\n\n- run: %s\n- event: %s%s\n\n%s\n' \
+            "build ワークフローの run が失敗した。README の「失敗したとき」を参照。" \
+            "${RUN_URL}" "${EVENT_NAME}" "${PHP_VERSION_INPUT:+（PHP ${PHP_VERSION_INPUT} を待機）}" "${failed}")"
+          list="$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"${title}\" in:title" --json number,title)"
+          number="$(jq -r --arg t "${title}" 'map(select(.title == $t)) | first | .number // ""' <<< "${list}")"
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" --repo "${GITHUB_REPOSITORY}" --body "${body}"
+          else
+            gh issue create --repo "${GITHUB_REPOSITORY}" --title "${title}" --body "${body}"
+          fi

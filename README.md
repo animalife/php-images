@@ -24,23 +24,27 @@ php.net での公開からそのままパッチ入りのイメージを作るた
     --deny-self-hosted-runners
   ```
 
-  attestation はマルチアーキの index の digest にだけ付く。アーキごとの manifest の digest を渡すと verify は失敗する
+  attestation はマルチアーキの index の digest にだけ付く。アーキごとの manifest の digest を渡すと verify は失敗する。
+  公開を main の run に限る本当の境界はこの検証（`--source-ref refs/heads/main` と `--signer-workflow`）で、消費側はこれを必ず通す前提にする。
+  environment `ghcr-publish` は誤操作のガードで、書き込み権限者がブランチ上で外せば GHCR には書ける
 
 - 固定タグも、同じ版のまま作り直すと指す先が変わる。親イメージ（`baseImages`）や上流の Dockerfile の更新、
   ビルドの入力の変更で再ビルドすると、同じ `8.6.0-cli-trixie` / `1.14.0-php8.6.0-trixie` が新しい digest を指す。
   内容を固定したいときは digest で参照する
 - 移動タグは古い版へは戻さない（並走した run の巻き戻しを防ぐため）。意図的に戻すときは手で付け替える。
-  公開の判定は次のとおり（`scripts/lib/publish.mjs`）
+  公開の判定は次の順に決まる（`scripts/lib/publish.mjs`）
   - この run がビルドに使った pin（`baseImages` や FrankenPHP の pin。php では php に関わるものだけ）が main の先端より古ければ、
-    push の run はタグを付けずに終える（後続の run が組み直す）。版を指定した待機 run は失敗にする。
+    push の run はタグを付けずに成功で終える（後続の run が組み直す）。再実行（Re-run）した push の run は失敗にする。
+    待機 run は同じ版で起動し直す（下の「予告がある夜」）。
     後続の run は main への push で起きることを前提にしている。`[skip ci]` などでワークフローが起きない push だと
     組み直されないので、そのときは版を指定しない workflow_dispatch で全部ビルドし直す
-  - 現行の移動タグと版が同じで、移動タグの方が新しい上流の Dockerfile（docker-library/php の commit）で組まれていれば、
-    上書きしない（タグを付けずに成功）。古い Dockerfile で組んだ run が後から公開して中身を戻さないように
-  - 現行の移動タグの方が新しければ、固定タグだけ付ける
+  - 版が現行の移動タグと同じで、移動タグの方が公開時点の `library/php` の GitCommit（新しい上流の Dockerfile）で組まれ、
+    今回はそうでなければ、上書きしない（タグを付けずに成功）。古い Dockerfile で組んだ run が後から公開して中身を戻さないように
+  - 版がすべて現行以上なら（同じ版を含む）、固定タグと移動タグを付ける
+  - 現行の移動タグの方が新しければ（版がすべて現行以下で、どれかが小さい）、固定タグだけ付ける
+  - FrankenPHP と PHP の一方が上がり一方が下がる場合は、タグを付けずに run を失敗にする
 - push の run は、php の移動タグが official-images より新しい版（待機 run が php.net から組んだもの）を指していれば、
   その版に差し替えて組む。official-images の版のまま組むと移動タグを動かせず、親イメージの更新が届かないため
-  - FrankenPHP と PHP の一方が上がり一方が下がる場合は、タグを付けずに run を失敗にする
 - `staging-*` タグは attestation を付ける前の一時置き場で、使わない
 
 ## 設定: versions.json
@@ -111,11 +115,27 @@ php.net で 8.6.1 が公開される（リリース情報に載り、tarball と
   追うタグや os などそれ以外は dispatch した時点の値を使い、移動タグに載せるかの判定もこの「実際に使った値」で行う。
   スクリプトとワークフローも dispatch した時点のもので動く（待機中に main で直したものは、その run には効かない）
 - FrankenPHP は必ずこの run がビルドした php の上に組む
-- 作ったイメージは php と FrankenPHP の移動タグに必ず載せる。載せられないとき（ビルド中に main の pin が進んだ、
-  版の一方が下がる）は run を失敗にする。同じ版を指定して dispatch し直せば、新しい pin で組み直す
-- 例外として、現行の移動タグがすでに同じかそれ以上の版をすべて持っている（official-images がより新しい版に追いついた
-  など）ときは、移動タグを動かさず固定タグだけ付けて成功にする。セキュリティ版はすでに移動タグに載っているため
+- 作ったイメージは php と FrankenPHP の移動タグに必ず載せる
+  - ビルド中に main の pin が進んで古い pin になったときは、タグを付けずに、同じ版を指定した run を自動で起動し直す
+    （新しい run は main の新しい pin で組み、php.net にはもう版があるのですぐビルドに入る）。この run は緑で終わり、
+    Summary に起動し直したことが出るので、結果は新しい run で確かめる。起動し直すのは 3 回までで、上限に達したら失敗にする。
+    再実行（Re-run）した待機 run でも同じように起動し直す
+  - 版の一方が下がる（conflict）など、pin を新しくしても直らないものは起動し直さずに失敗にする
+- 例外として、次のときは移動タグを動かさずに成功にする。どちらもセキュリティ版はすでに移動タグに載っている
+  - 現行の移動タグの方が新しい版を持つ（official-images がより新しい版に追いついたなど）。固定タグだけ付ける
+  - 同じ版が、新しい上流の Dockerfile で組まれてすでに移動タグにある。タグを付けない
+- 版を打ち間違えていないか、待ち始める前に確かめる。現行の移動タグより大きく、+3 パッチ以内でなければ待たずに失敗する
+  （移動タグがまだ無い初回は確かめない）
 - 待機中も普段のビルドは止まらない（待機 run は版ごとに別の concurrency グループ）
+
+### 失敗したとき
+
+main の run でどれかのジョブが失敗・取り消しになると、Issue「build ワークフローが main で失敗している」を作る（開いていればコメントを足す）。
+
+- 待機 run（版を指定した dispatch）は、Re-run ではなく同じ版を指定して dispatch し直す（`redispatch-count` は 0 のまま）
+- push の run は Re-run all jobs か、版を指定しない workflow_dispatch で直す。push の差分の基準は「最後に成功した push run」なので、
+  失敗した変更は次の push の run にも含まれる
+- artifact は JSON が 7 日、FrankenPHP の OCI アーカイブが 3 日で消える。それより古い run は再実行できない
 
 ### 全部ビルドし直す
 
@@ -129,13 +149,17 @@ gh workflow run build.yml -R animalife/php-images
 packages: write を持つジョブ（php-build・php-publish・frankenphp-push・frankenphp-publish）がこの environment を使う。
 作る前に走らせると、GitHub が制限なしの environment を自動で作ってしまい、ブランチから dispatch した run も GHCR に書ける。
 
+初回の公開のあと、GHCR のパッケージ（`php-images/php` と `php-images/frankenphp`）は private で作られる。
+パッケージの Package settings → Danger Zone → Change visibility で public にする。消費側のリポジトリから読めることも確かめる。
+
 手元では確かめられなかったもの。
 
 - environment `ghcr-publish` のデプロイブランチの制限で、main 以外からの run の公開ジョブが止まること
 - マージキュー（merge_group）で ci.yml が走り、`CI Gate` が成功すること
 - ジョブ単位の `concurrency.queue: max`（publish ジョブ）が効き、待機中の公開が取り消されないこと
 - `uses: $/.github/actions/publish-image` で composite action が解決されること
-- GHCR への push・attestation の push（`gh attestation verify` が通る）・パッケージの可視性
+- GHCR への push・attestation の push（`gh attestation verify` が通る）
+- main の run が失敗したときに Issue ができること（同名の Issue が開いていればコメントになること）
 - 待機 run で、main の `versions.json` を `git fetch origin main` で読み直せること
 - amd64 のビルド（手元では arm64 だけを確かめた）
 
@@ -143,11 +167,20 @@ packages: write を持つジョブ（php-build・php-publish・frankenphp-push�
 
 ```sh
 npm test                                        # scripts/ の単体テスト（Node 24）
-export AQUA_CONFIG=.github/aqua.yaml && aqua i  # jactionlint / zizmor / container-structure-test
-jactionlint --profile correctness
-zizmor --persona pedantic .
+AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua i     # jactionlint / zizmor（CI でだけ使う）
+AQUA_CONFIG=.github/aqua.yaml aqua i            # container-structure-test（build.yml が使う）
+AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua exec -- jactionlint --profile correctness
+AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua exec -- zizmor --persona pedantic .
 ```
 
 - アクションは完全な commit SHA で pin する。`.github/workflows/actions.lock` は `gh actions-lock --no-narrow` で作り直す
-- aqua のツールの版を変えたら `AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune` で checksum を作り直す
-- PR では `.github/workflows/ci.yml` が lint・テスト・親イメージの pin の検査・Renovate 設定の検証・actions.lock の検証を行い、`CI Gate` に集約する
+- aqua のツールの版を変えたら、その設定ごとに `AQUA_CONFIG=<設定> aqua update-checksum --prune` で checksum を作り直す。
+  `.github/aqua.yaml` はビルドの入力（変えると全版を作り直す）、`.github/aqua-ci/aqua.yaml` は CI だけで使う
+- PR とマージキューでは `.github/workflows/ci.yml` が lint・テスト・親イメージの pin の検査・php の amd64 のビルド（push しない）・
+  Renovate 設定の検証・actions.lock の検証を行い、`CI Gate` に集約する
+
+### GHCR の untagged
+
+再ビルドのたびに、タグの外れた index とアーキごとの manifest が残る。untagged を単純に消すと、タグ付きの index が
+参照している子の manifest（アーキごとの manifest や attestation）まで消えてイメージが壊れる。掃除するなら、
+index からの参照を検証してから消す仕組みを使う

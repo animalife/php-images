@@ -7,7 +7,7 @@
         // .github/aqua.yaml の packages と registry を追う。preset はタグ付け替え対策で SHA pin し、
         // 下の customManager が末尾コメントの版を基に新しいタグの SHA へ更新する。
         // renovate: datasource=github-tags depName=aquaproj/aqua-renovate-config
-        'github>aquaproj/aqua-renovate-config:file#6ce68f09aca25a88624f468d93fd38e2365e35e0(\\.github/aqua\\.ya?ml)', // 2.15.0
+        'github>aquaproj/aqua-renovate-config:file#6ce68f09aca25a88624f468d93fd38e2365e35e0(\\.github/(aqua-ci/)?aqua\\.ya?ml)', // 2.15.0
     ],
     timezone: 'Asia/Tokyo',
     // 冷却は GitHub Actions など、このリポジトリの CI で書き込み権限付きで動くものに効かせる。
@@ -46,10 +46,10 @@
             datasourceTemplate: 'docker',
         },
         {
-            description: 'build.yml の setup-buildx-action に渡す BuildKit のイメージ（tag と digest）',
+            description: 'build.yml と ci.yml の setup-buildx-action に渡す BuildKit のイメージ（tag と digest）',
             customType: 'regex',
             managerFilePatterns: [
-                '/^\\.github/workflows/build\\.yml$/',
+                '/^\\.github/workflows/(build|ci)\\.yml$/',
             ],
             matchStrings: [
                 'image=(?<depName>moby/buildkit):(?<currentValue>[^@\\s]+)@(?<currentDigest>sha256:[0-9a-f]{64})',
@@ -92,23 +92,46 @@
     ],
     packageRules: [
         {
-            description: 'GitHub Actions は平日の朝にまとめて更新する。minor 以下と digest は自動マージ',
+            description: 'ビルドの入力（GitHub Actions、BuildKit、Node）の更新は週 1 回、1 つの PR にまとめる。マージのたびに build.yml が全版を作り直して公開し、消費側に digest 更新が届き、直列の run でセキュリティ更新も詰まるため。minor 以下と digest は自動マージ',
             matchManagers: [
                 'github-actions',
+                'nodenv',
             ],
+            groupName: 'build inputs',
             schedule: [
-                'before 10am every weekday',
+                'before 10am on monday',
+            ],
+        },
+        {
+            matchPackageNames: [
+                'moby/buildkit',
+            ],
+            groupName: 'build inputs',
+            schedule: [
+                'before 10am on monday',
             ],
         },
         {
             matchManagers: [
                 'github-actions',
+                'nodenv',
             ],
             matchUpdateTypes: [
                 'minor',
                 'patch',
                 'digest',
                 'pinDigest',
+            ],
+            automerge: true,
+        },
+        {
+            matchPackageNames: [
+                'moby/buildkit',
+            ],
+            matchUpdateTypes: [
+                'minor',
+                'patch',
+                'digest',
             ],
             automerge: true,
         },
@@ -170,21 +193,6 @@
             automerge: true,
         },
         {
-            description: 'BuildKit は GitHub Actions と同じく平日の朝・3 日冷却で、minor 以下と digest を自動マージする',
-            matchPackageNames: [
-                'moby/buildkit',
-            ],
-            schedule: [
-                'before 10am every weekday',
-            ],
-            matchUpdateTypes: [
-                'minor',
-                'patch',
-                'digest',
-            ],
-            automerge: true,
-        },
-        {
             description: 'ランナーのラベル（runs-on の ubuntu-24.04 など）と .node-version のメジャー更新は提案させない。ランナーは versions.json の platforms にも書いてあり、片方だけ上がると食い違う。上げるときは両方を手で揃える',
             matchDatasources: [
                 'github-runners',
@@ -196,9 +204,10 @@
             enabled: false,
         },
         {
-            description: 'aqua の版の更新は aqua-checksums.json の作り直し（`AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune`）が要るので、1 つの PR にまとめて手動マージにする',
+            description: 'aqua の版の更新は aqua-checksums.json の作り直し（`AQUA_CONFIG=<設定> aqua update-checksum --prune`）が要るので、1 つの PR にまとめて手動マージにする',
             matchFileNames: [
                 '.github/aqua.yaml',
+                '.github/aqua-ci/aqua.yaml',
             ],
             groupName: 'aqua',
             automerge: false,

@@ -19,8 +19,9 @@ export function pinsStale(runVersions, mainVersions, kind, minor) {
   return a !== b;
 }
 
-export function decidePublish({ current, candidate, mustLand, stale, commits = null }) {
+export function decidePublish({ current, candidate, mustLand, stale, commits = null, redispatch = false }) {
   if (stale) {
+    if (redispatch) return 'redispatch';
     if (mustLand) throw new Error('この run がビルドに使った pin は main の先端より古いので、移動タグに載せられない。同じ版を指定して dispatch し直す');
     return 'skip';
   }
@@ -38,7 +39,7 @@ export function decidePublish({ current, candidate, mustLand, stale, commits = n
 export function tagsToApply(decision, image, { fixed, moving }) {
   if (decision === 'move') return [`${image}:${fixed}`, `${image}:${moving}`];
   if (decision === 'keep') return [`${image}:${fixed}`];
-  if (decision === 'skip') return [];
+  if (decision === 'skip' || decision === 'redispatch') return [];
   throw new Error(`判定が不正: ${decision}`);
 }
 
@@ -71,4 +72,16 @@ export function upstreamCommitOf(image) {
   const configs = image.config ? [image] : Object.values(image);
   const values = [...new Set(configs.map((c) => c?.config?.Labels?.[UPSTREAM_COMMIT_LABEL] ?? null))];
   return values.length === 1 ? values[0] : null;
+}
+
+export function mustLandFor(runKind, runAttempt) {
+  if (!/^[1-9]\d*$/.test(runAttempt ?? '')) throw new Error(`RUN_ATTEMPT が不正: '${runAttempt}'`);
+  return runKind === 'wait' || runAttempt !== '1';
+}
+
+export const MAX_REDISPATCH = 3;
+
+export function canRedispatch(runKind, count) {
+  if (!/^\d+$/.test(count ?? '')) throw new Error(`起動し直した回数が不正: '${count}'`);
+  return runKind === 'wait' && Number(count) < MAX_REDISPATCH;
 }
