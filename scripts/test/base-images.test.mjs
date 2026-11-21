@@ -93,3 +93,8 @@ test('普通のコメントの後ろの # syntax= はディレクティブとし
   assert.equal(dockerfileRefs('# hello\n# syntax=docker/dockerfile:1.4\nFROM scratch\n').syntax, null);
   assert.equal(dockerfileRefs('# check=error=true\n# syntax=docker/dockerfile:1\nFROM scratch\n').syntax, 'docker/dockerfile:1');
 });
+
+test('数字のステージ参照（COPY --from=0）はステージとして扱う', () => {
+  const out = pinBaseImages({ dockerfile: 'FROM debian:trixie-slim\nFROM debian:trixie-slim\nCOPY --from=0 /a /a\n', pins: { 'debian:trixie-slim': d('1') } });
+  assert.deepEqual(Object.keys(out.contexts), ['debian:trixie-slim']);
+});

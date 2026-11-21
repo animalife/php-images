@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { waitForRelease } from '../lib/php-release.mjs';
+import { finishWait, waitForRelease } from '../lib/php-release.mjs';
 
 const released = { version: '8.6.1', source: [{ filename: 'php-8.6.1.tar.xz', sha256: 'b'.repeat(64) }] };
 const unknown = { error: 'Unknown version' };
@@ -80,4 +80,11 @@ test('リリース情報が出ても tarball が取れなければ待ち続け�
   });
   assert.equal(result.status, 'found');
   assert.equal(clock, 300);
+});
+
+// 撤回した方針: 以前は期限切れを success で静かに終えていたが、翌朝に緑を見てビルド済みと誤解するので失敗にする。
+test('finishWait: 公開されていればリリース情報を返し、期限切れと取得失敗は例外にする', () => {
+  assert.deepEqual(finishWait({ status: 'found', release: released }, '8.6.1'), released);
+  assert.throws(() => finishWait({ status: 'timeout' }, '8.6.1'), /期限までに公開されなかった/);
+  assert.throws(() => finishWait({ status: 'error', message: 'bad' }, '8.6.1'), /bad/);
 });

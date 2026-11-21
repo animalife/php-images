@@ -1,6 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { waitForRelease } from './lib/php-release.mjs';
+import { finishWait, waitForRelease } from './lib/php-release.mjs';
 import { env, main, setOutput } from './lib/gha.mjs';
 
 async function fetchJson(url) {
@@ -30,13 +30,7 @@ main(async () => {
     },
     log: (m) => console.log(`${new Date().toISOString()} ${m}`),
   });
-  if (result.status === 'error') throw new Error(`期限までに php.net を確認できなかった: ${result.message}`);
-  if (result.status === 'timeout') {
-    console.log(`::notice::PHP ${version} は期限までに公開されなかった。ビルドせずに終える`);
-    setOutput('found', 'false');
-    return;
-  }
-  writeFileSync(env('RELEASE_FILE'), JSON.stringify(result.release));
+  writeFileSync(env('RELEASE_FILE'), JSON.stringify(finishWait(result, version)));
   console.log(`PHP ${version} が公開された`);
   setOutput('found', 'true');
 });

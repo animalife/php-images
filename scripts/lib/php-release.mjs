@@ -41,3 +41,9 @@ export async function waitForRelease({
     await sleep(Math.min(interval, left));
   }
 }
+
+export function finishWait(result, version) {
+  if (result.status === 'found') return result.release;
+  if (result.status === 'timeout') throw new Error(`PHP ${version} は期限までに公開されなかった。ビルドしていない`);
+  throw new Error(`期限までに php.net を確認できなかった: ${result.message}`);
+}

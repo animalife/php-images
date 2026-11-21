@@ -47,7 +47,7 @@ export function pinBaseImages({ dockerfile, contexts = {}, exempt = [], pins }) 
     if (ref) out[name] = `docker-image://${ref}`;
   }
   for (const ref of refs) {
-    if (stages.includes(ref) || ref in contexts || ref === 'scratch') continue;
+    if (stages.includes(ref) || /^\d+$/.test(ref) || ref in contexts || ref === 'scratch') continue;
     const p = pinned(ref, pins);
     if (p) out[ref] = `docker-image://${p}`;
   }

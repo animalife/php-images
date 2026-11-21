@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pinsStale, decidePublish, tagsToApply, choosePhpBase } from '../lib/publish.mjs';
+import { pinsStale, decidePublish, tagsToApply, choosePhpBase, runVersions } from '../lib/publish.mjs';
 
 const digest = (c) => `sha256:${c.repeat(64)}`;
 const versions = () => ({
@@ -115,4 +115,22 @@ test('push run: 移動タグを動かしたときだけ自分の php の上に�
 test('待機 run: FrankenPHP は必ず自分がビルドした php の上に組む', () => {
   assert.deepEqual(choosePhpBase({ built: true, record: record('keep'), mustLand: true }), { source: 'own', digest: digest('a'), phpVersion: '8.6.1' });
   assert.throws(() => choosePhpBase({ built: false, record: null, mustLand: true }), /待機/);
+});
+
+// 待機 run は pin だけを公開時点の main から取り、追うタグや os、platforms はディスパッチ時点の値でビルドする。
+// 古さの判定はこの「実際に使った値」で行うので、両者を合わせたものを作る。
+test('runVersions: ディスパッチ時点の設定に main の pin（baseImages と frankenphp）だけを重ねる', () => {
+  const dispatch = versions();
+  const main = versions();
+  main.baseImages.php['debian:trixie-slim'] = digest('b');
+  main.frankenphp.version = 'v1.14.1';
+  main.php['8.6'].officialTag = '8.6-cli-forky';
+  main.platforms = [];
+  const used = runVersions(dispatch, main);
+  assert.deepEqual(used.baseImages, main.baseImages);
+  assert.deepEqual(used.frankenphp, main.frankenphp);
+  assert.deepEqual(used.php, dispatch.php);
+  assert.deepEqual(used.platforms, dispatch.platforms);
+  // main で追うタグが変わっていれば、実際に使った値（ディスパッチ時点）と比べて古いと判定される。
+  assert.equal(pinsStale(used, main, 'php', '8.6'), true);
 });

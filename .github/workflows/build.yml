@@ -102,7 +102,7 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
-      # 期限は job の timeout-minutes より手前に置き、未公開のまま失敗扱いにならず静かに終える。
+      # 期限は job の timeout-minutes より手前に置き、未公開なら自分で失敗させて理由を残す。
       - name: Wait
         id: wait
         env:
@@ -112,17 +112,22 @@ jobs:
           DEADLINE_SECONDS: '20700'
         run: node scripts/wait-php-release.mjs
 
-      # 待つ間に Renovate が pin（FrankenPHP・親イメージ）を進めていたら、公開時点の main の versions.json でビルドする。
+      # 待つ間に Renovate が pin（FrankenPHP・親イメージ）を進めていたら、公開時点の main の pin でビルドする。
       # dispatch 時点の pin のまま作ると、先に移動タグを取った新しいビルドと食い違うか、親イメージの更新を巻き戻す。
+      # 追うタグや os などはディスパッチ時点の値のままなので、実際に使う値を run-versions.json にまとめ、以降の判定もこれで行う。
       - name: Re-read pins from main
         id: pin
         if: ${{ steps.wait.outputs.found == 'true' }}
         env:
-          VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
+          DISPATCH_VERSIONS_FILE: versions.json
+          MAIN_VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
+          OUT_FILE: ${{ runner.temp }}/run-versions.json
+          VERSIONS_FILE: ${{ runner.temp }}/run-versions.json
         run: |
           set -euo pipefail
           git fetch --depth 1 origin main
-          git show FETCH_HEAD:versions.json > "${VERSIONS_FILE}"
+          git show FETCH_HEAD:versions.json > "${MAIN_VERSIONS_FILE}"
+          node scripts/run-versions.mjs
           node scripts/verify-frankenphp-pin.mjs
 
       - name: Upload versions snapshot
@@ -130,7 +135,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: versions-snapshot
-          path: ${{ runner.temp }}/main-versions.json
+          path: ${{ runner.temp }}/run-versions.json
           if-no-files-found: error
           retention-days: 1
 
@@ -218,7 +223,7 @@ jobs:
         env:
           KIND: php
           DOCKERFILE: upstream/${{ steps.resolve.outputs.directory }}/Dockerfile
-          VERSIONS_FILE: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/main-versions.json', runner.temp) || '' }}
+          VERSIONS_FILE: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || '' }}
         run: node scripts/pin-base-images.mjs
 
       # ディレクトリをそのまま upload しない。upload-artifact はファイルモードを保たず、docker-php-* の実行ビットが落ちる
@@ -436,7 +441,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 待機 run は公開を確認した時点の main の versions.json（スナップショット）でビルドしている。
+      # 待機 run がビルドに使った値（run-versions.json）。
       - name: Download versions snapshot
         if: ${{ needs.wait.outputs.found == 'true' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -456,7 +461,7 @@ jobs:
           os: ${{ matrix.os }}
           official-tag: ${{ matrix.officialTag }}
           run-kind: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
-          run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/main-versions.json', runner.temp) || 'versions.json' }}
+          run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || 'versions.json' }}
           minor: ${{ matrix.version }}
 
       # FrankenPHP のビルドが php-base を決めるのに使う（scripts/lib/publish.mjs の choosePhpBase）。
@@ -478,12 +483,68 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  frankenphp-build:
-    name: Build frankenphp ${{ matrix.slug }}
+  # 両アーキを同じ php の上に組むため、php-base は版ごとに 1 回だけ決めて配る（移動タグをアーキごとに読むと、
+  # その間に別の run が移動タグを動かしたとき、アーキで違う php の上に組まれる）。
+  frankenphp-prepare:
+    name: Prepare frankenphp ${{ matrix.version }}
     needs: [plan, wait, php-publish]
     # php のジョブが skipped（FrankenPHP の pin だけの更新）でも走らせる。
     # needs だけだと依存先が skipped のとき後続も skipped になる。
     if: ${{ !failure() && !cancelled() && needs.plan.outputs.frankenphpBuilds != '[]' && (needs.wait.result == 'skipped' || needs.wait.outputs.found == 'true') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout に必要
+      packages: read # php イメージの移動タグを読むのに必要
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.frankenphpPublishes) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: php-digest-${{ matrix.version }}
+          path: ${{ runner.temp }}/php-digest
+          merge-multiple: true
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve php base
+        env:
+          MINOR: ${{ matrix.version }}
+          OFFICIAL_TAG: ${{ matrix.officialTag }}
+          PHP_VERSIONS: ${{ needs.plan.outputs.phpVersions }}
+          RUN_KIND: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
+          RECORD_FILE: ${{ runner.temp }}/php-digest/${{ matrix.version }}.json
+          OUT_FILE: ${{ runner.temp }}/php-base/php-base.json
+        run: |
+          mkdir -p "${RUNNER_TEMP}/php-base"
+          node scripts/resolve-php-base.mjs
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: php-base-${{ matrix.version }}
+          path: ${{ runner.temp }}/php-base/
+          if-no-files-found: error
+          retention-days: 1
+
+  frankenphp-build:
+    name: Build frankenphp ${{ matrix.slug }}
+    needs: [plan, wait, frankenphp-prepare]
+    if: ${{ !cancelled() && needs.frankenphp-prepare.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     # 上流の Dockerfile は GITHUB_TOKEN を secret としてマウントした RUN で、版を固定しない第三者のソース
@@ -523,9 +584,8 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: php-digest-${{ matrix.version }}
-          path: ${{ runner.temp }}/php-digest
-          merge-multiple: true
+          name: php-base-${{ matrix.version }}
+          path: ${{ runner.temp }}/php-base
 
       # 既定の moby/buildkit:buildx-stable-1 はタグ参照で、push-by-digest では GHCR の認証情報を受け取る。digest で固定する。
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -538,16 +598,17 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve php base
+      - name: Read php base
         id: php
-        env:
-          MINOR: ${{ matrix.version }}
-          OFFICIAL_TAG: ${{ matrix.officialTag }}
-          PHP_VERSIONS: ${{ needs.plan.outputs.phpVersions }}
-          RUN_KIND: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
-          RECORD_FILE: ${{ runner.temp }}/php-digest/${{ matrix.version }}.json
-          OUT_FILE: ${{ runner.temp }}/php-base.json
-        run: node scripts/resolve-php-base.mjs
+        run: |
+          set -euo pipefail
+          f="${RUNNER_TEMP}/php-base/php-base.json"
+          digest="$(jq -r .digest "${f}")"
+          if ! [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::php-base の digest が不正: '${digest}'"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Pin base images
         id: bake
@@ -557,7 +618,7 @@ jobs:
           OFFICIAL_TAG: ${{ matrix.officialTag }}
           KIND: frankenphp
           BAKE_FILE: ${{ runner.temp }}/bake.json
-          SNAPSHOT: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/main-versions.json', runner.temp) || '' }}
+          SNAPSHOT: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || '' }}
         run: |
           set -euo pipefail
           target="runner-php-${MINOR//./-}-${OS}"
@@ -607,7 +668,7 @@ jobs:
             exit 1
           fi
           echo "${digest}" > "${RUNNER_TEMP}/oci/digest"
-          cp "${RUNNER_TEMP}/php-base.json" "${RUNNER_TEMP}/oci/php-base.json"
+          cp "${RUNNER_TEMP}/php-base/php-base.json" "${RUNNER_TEMP}/oci/php-base.json"
           {
             echo "### frankenphp ${SLUG}"
             echo ""
@@ -778,7 +839,7 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 待機 run は公開を確認した時点の main の versions.json（スナップショット）でビルドしている。
+      # 待機 run がビルドに使った値（run-versions.json）。
       - name: Download versions snapshot
         if: ${{ needs.wait.outputs.found == 'true' }}
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -797,5 +858,5 @@ jobs:
           os: ${{ matrix.os }}
           frankenphp-version: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}
           run-kind: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
-          run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/main-versions.json', runner.temp) || 'versions.json' }}
+          run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || 'versions.json' }}
           minor: ${{ matrix.version }}

@@ -19,7 +19,8 @@ php.net での公開からそのままパッチ入りのイメージを作るた
   ```sh
   gh attestation verify oci://ghcr.io/animalife/php-images/frankenphp:php8.6-trixie \
     --repo animalife/php-images \
-    --signer-workflow animalife/php-images/.github/workflows/build.yml
+    --signer-workflow animalife/php-images/.github/workflows/build.yml \
+    --source-ref refs/heads/main
   ```
 
 - 固定タグも、同じ版のまま作り直すと指す先が変わる。親イメージ（`baseImages`）や上流の Dockerfile の更新、
@@ -48,6 +49,15 @@ php.net での公開からそのままパッチ入りのイメージを作るた
   取得した Dockerfile や bake の定義が pin の無いイメージを参照していたらビルドを止める（上流が親イメージを変えたら、ここに足して直す）。
   Renovate が digest だけを更新する
 - `platforms`: プラットフォームとランナー。ワークフローの `runs-on` と揃えて手で上げる（Renovate はランナーのメジャー更新を提案しない）
+
+### digest 固定が及ばない入力
+
+上流の Dockerfile は書き換えないので、次はビルドのたびにその時点のものを取る。同じ pin でも中身が変わりうる。
+
+- FrankenPHP の Dockerfile が取る `install-php-extensions`（mlocati/docker-php-extension-installer の `releases/latest`、checksum の検査なし）
+- FrankenPHP の Dockerfile が取る e-dant/watcher（GitHub の `releases/latest` の tarball、checksum の検査なし）
+- どちらの Dockerfile も行う `apt-get update` / `apt-get install` の Debian パッケージ
+- php のソース（php.net の tarball）は版と `PHP_SHA256` で固定され、`.asc` の署名も検査される。Go のモジュールは上流の `go.sum` で検査される
 
 ### 版を足す
 
@@ -85,12 +95,15 @@ php.net で 8.6.1 が公開される（リリース情報に載り、tarball と
 上流の Dockerfile の `PHP_VERSION` / `PHP_URL`・`PHP_ASC_URL` / `PHP_SHA256` だけを差し替えてビルドする。
 `GPG_KEYS` は差し替えないので、`.asc` の署名検証は上流の Dockerfile のまま行われる。
 
-- 約 5 時間 45 分のうちに公開されなければ、失敗にせずビルドしないで終える
+- 約 5 時間 45 分のうちに公開されなければ、ビルドせずに run を失敗にする（翌朝に緑を見てビルド済みと誤解しないように）
 - official-images がすでにその版（以降）に追いついていれば、差し替えずにそのままビルドする
-- pin は dispatch した時点ではなく、公開を確認した時点の main の `versions.json` を使う
+- pin（`baseImages` と `frankenphp`）は dispatch した時点ではなく、公開を確認した時点の main のものを使う。
+  追うタグや os などそれ以外は dispatch した時点の値を使い、移動タグに載せるかの判定もこの「実際に使った値」で行う
 - FrankenPHP は必ずこの run がビルドした php の上に組む
 - 作ったイメージは php と FrankenPHP の移動タグに必ず載せる。載せられないとき（ビルド中に main の pin が進んだ、
   版の一方が下がる）は run を失敗にする。同じ版を指定して dispatch し直せば、新しい pin で組み直す
+- 例外として、現行の移動タグがすでに同じかそれ以上の版をすべて持っている（official-images がより新しい版に追いついた
+  など）ときは、移動タグを動かさず固定タグだけ付けて成功にする。セキュリティ版はすでに移動タグに載っているため
 - 待機中も普段のビルドは止まらない（待機 run は版ごとに別の concurrency グループ）
 
 ### 全部ビルドし直す

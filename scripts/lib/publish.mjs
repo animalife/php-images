@@ -47,3 +47,7 @@ export function choosePhpBase({ built, record, mustLand }) {
   if (mustLand || record.decision === 'move') return { source: 'own', digest: record.digest, phpVersion: record.phpVersion };
   return { source: 'moving' };
 }
+
+export function runVersions(dispatch, main) {
+  return { ...dispatch, baseImages: main.baseImages, frankenphp: main.frankenphp };
+}
