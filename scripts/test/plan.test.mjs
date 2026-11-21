@@ -14,8 +14,8 @@ const base = () => ({
     frankenphp: { 'golang:1.27-trixie': digest('8'), 'docker/dockerfile:1': digest('9') },
   },
   php: {
-    '8.6': { os: 'trixie', officialTag: '8.6-cli-trixie', officialDigest: digest('1') },
-    '8.5': { os: 'trixie', officialTag: '8.5-zts-trixie', officialDigest: digest('2') },
+    '8.6': { os: 'trixie', officialTag: '8.6.0-cli-trixie', officialDigest: digest('1') },
+    '8.5': { os: 'trixie', officialTag: '8.5.13-zts-trixie', officialDigest: digest('2') },
   },
 });
 
@@ -27,10 +27,10 @@ test('validateVersions は正しい設定を通す', () => {
 
 test('validateVersions は追うタグと minor / os の食い違いを弾く', () => {
   const v = base();
-  v.php['8.6'].officialTag = '8.5-cli-trixie';
+  v.php['8.6'].officialTag = '8.5.0-cli-trixie';
   assert.throws(() => validateVersions(v), /officialTag/);
   const w = base();
-  w.php['8.6'].officialTag = '8.6-cli-bookworm';
+  w.php['8.6'].officialTag = '8.6.0-cli-bookworm';
   assert.throws(() => validateVersions(w), /officialTag/);
 });
 
@@ -40,10 +40,10 @@ test('validateVersions は形式の崩れた値を弾く', () => {
     (v) => { v.frankenphp.version = '1.14.0'; },
     (v) => { v.frankenphp.commit = 'main'; },
     (v) => { v.php['8.x'] = v.php['8.6']; },
-    (v) => { v.php['8.6'].officialTag = '8.6-fpm-trixie'; },
+    (v) => { v.php['8.6'].officialTag = '8.6.0-fpm-trixie'; },
     // 上流の php_base_variant: 8.6 以上は cli、未満は zts。逆を書くと ZTS でない php の上に組むことになる。
-    (v) => { v.php['8.6'].officialTag = '8.6-zts-trixie'; },
-    (v) => { v.php['8.5'].officialTag = '8.5-cli-trixie'; },
+    (v) => { v.php['8.6'].officialTag = '8.6.0-zts-trixie'; },
+    (v) => { v.php['8.5'].officialTag = '8.5.13-cli-trixie'; },
     (v) => { v.php = {}; },
     (v) => { v.platforms = []; },
     (v) => { delete v.baseImages.frankenphp; },
@@ -139,9 +139,10 @@ test('workflow_dispatch（版の指定なし）は全部ビルドする', () => 
   assert.equal(plan.waitFor, '');
 });
 
-test('workflow_dispatch（版の指定あり）はその minor だけを待ってビルドする', () => {
+// 夜のジョブは自分では公開しない。公開を待って versions.json を上げる PR を作り、普段の push の経路に乗せる。
+test('workflow_dispatch（版の指定あり）はビルドせず、その版を待つだけ', () => {
   const plan = computePlan({ event: 'workflow_dispatch', after: base(), phpVersion: '8.6.1' });
-  assert.deepEqual(versionsOf(plan), { php: ['8.6'], frankenphp: ['8.6'] });
+  assert.deepEqual(versionsOf(plan), { php: [], frankenphp: [] });
   assert.equal(plan.waitFor, '8.6.1');
 });
 
@@ -156,11 +157,32 @@ test('想定外のイベントは例外にする', () => {
 });
 
 test('ビルド行列は版 × プラットフォームで、ジョブが要る値を持つ', () => {
-  const plan = computePlan({ event: 'workflow_dispatch', after: base(), phpVersion: '8.6.1' });
+  const after = base();
+  delete after.php['8.5'];
+  const plan = computePlan({ event: 'workflow_dispatch', after, phpVersion: '' });
+  const pin = { version: '8.6', phpVersion: '8.6.0', os: 'trixie', variant: 'cli', officialTag: '8.6.0-cli-trixie', movingTag: '8.6-cli-trixie' };
   assert.deepEqual(plan.phpBuilds, [
-    { version: '8.6', os: 'trixie', officialTag: '8.6-cli-trixie', platform: 'linux/amd64', runner: 'ubuntu-24.04', slug: '8.6-linux-amd64' },
-    { version: '8.6', os: 'trixie', officialTag: '8.6-cli-trixie', platform: 'linux/arm64', runner: 'ubuntu-24.04-arm', slug: '8.6-linux-arm64' },
+    { ...pin, platform: 'linux/amd64', runner: 'ubuntu-24.04', slug: '8.6-linux-amd64' },
+    { ...pin, platform: 'linux/arm64', runner: 'ubuntu-24.04-arm', slug: '8.6-linux-arm64' },
   ]);
   assert.deepEqual(plan.frankenphpBuilds, plan.phpBuilds);
-  assert.deepEqual(plan.phpPublishes, [{ version: '8.6', os: 'trixie', officialTag: '8.6-cli-trixie' }]);
+  assert.deepEqual(plan.phpPublishes, [pin]);
+});
+
+test('validateVersions は、夜のジョブが版だけを上げた（officialDigest が null）設定を通す', () => {
+  const v = base();
+  v.php['8.6'].officialTag = '8.6.1-cli-trixie';
+  v.php['8.6'].officialDigest = null;
+  assert.doesNotThrow(() => validateVersions(v));
+});
+
+test('validateVersions は officialTag のパッチ版の形を検査する', () => {
+  for (const tag of ['8.6-cli-trixie', '8.6.01-cli-trixie', '8.6.x-cli-trixie', '8.7.0-cli-trixie']) {
+    const v = base();
+    v.php['8.6'].officialTag = tag;
+    assert.throws(() => validateVersions(v), /officialTag/, tag);
+  }
+  const v = base();
+  v.php['8.6'].officialDigest = '';
+  assert.throws(() => validateVersions(v), /officialDigest/);
 });

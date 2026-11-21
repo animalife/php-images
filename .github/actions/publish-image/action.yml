@@ -20,27 +20,8 @@ inputs:
   kind:
     description: php / frankenphp
     required: true
-  os:
-    required: true
-  official-tag:
-    description: 追うタグ（versions.json の php.<minor>.officialTag）
-    required: true
-  frankenphp-version:
-    description: kind=frankenphp のときの pin した版
-    required: false
-    default: ''
   minor:
     description: PHP の minor（versions.json の php のキー）
-    required: true
-  run-kind:
-    description: wait（版を指定した待機 run）/ push。待機 run と再実行した run は、移動タグに載せられなければ失敗する
-    required: true
-  redispatch-count:
-    description: この待機 run までに起動し直した回数（scripts/lib/publish.mjs の MAX_REDISPATCH まで起動し直す）
-    required: false
-    default: '0'
-  run-versions-file:
-    description: この run がビルドに使った versions.json
     required: true
 
 outputs:
@@ -48,7 +29,7 @@ outputs:
     description: 公開した index の digest
     value: ${{ steps.index.outputs.digest }}
   decision:
-    description: タグの判定（move / keep / skip / redispatch）
+    description: タグの判定（move / skip）
     value: ${{ steps.tags.outputs.decision }}
   php-version:
     description: 公開した index の PHP の版
@@ -96,35 +77,25 @@ runs:
         subject-digest: ${{ steps.index.outputs.digest }}
         push-to-registry: true
 
-    # pin の古さは、この run の versions.json と main の先端のものを比べて決める。
-    - name: Fetch versions.json on main and library/php
+    # pin の古さは、この run の versions.json（checkout したもの）と main の先端のものを比べて決める。
+    - name: Fetch versions.json on main
       shell: bash
-      env:
-        GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
         git fetch --depth 1 origin main
         git show FETCH_HEAD:versions.json > "${RUNNER_TEMP}/main-versions.json"
-        gh api repos/docker-library/official-images/contents/library/php \
-          -H 'Accept: application/vnd.github.raw+json' > "${RUNNER_TEMP}/library-php-now"
 
     - name: Decide tags
       id: tags
       shell: bash
       env:
         KIND: ${{ inputs.kind }}
-        OS: ${{ inputs.os }}
-        OFFICIAL_TAG: ${{ inputs.official-tag }}
-        FRANKENPHP_VERSION: ${{ inputs.frankenphp-version }}
         IMAGE: ${{ inputs.image }}
         INDEX_DIGEST: ${{ steps.index.outputs.digest }}
         MINOR: ${{ inputs.minor }}
-        RUN_KIND: ${{ inputs.run-kind }}
         RUN_ATTEMPT: ${{ github.run_attempt }}
-        REDISPATCH_COUNT: ${{ inputs.redispatch-count }}
-        RUN_VERSIONS_FILE: ${{ inputs.run-versions-file }}
+        RUN_VERSIONS_FILE: versions.json
         MAIN_VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
-        LIBRARY_FILE: ${{ runner.temp }}/library-php-now
       run: node scripts/publish-tags.mjs
 
     - name: Tag
@@ -141,7 +112,7 @@ runs:
         for r in "${refs[@]}"; do args+=(-t "${r}"); done
         if [ "${#args[@]}" -gt 0 ]; then
           docker buildx imagetools create "${args[@]}" "${IMAGE}@${INDEX_DIGEST}"
-        elif [ "${DECISION}" != "skip" ] && [ "${DECISION}" != "redispatch" ]; then
+        elif [ "${DECISION}" != "skip" ]; then
           echo "::error::判定は ${DECISION} なのに付けるタグが無い"
           exit 1
         fi

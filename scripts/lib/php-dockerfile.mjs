@@ -1,5 +1,5 @@
 import { assertStableVersion } from './php-release.mjs';
-import { compareVersions, minorOf } from './tags.mjs';
+import { minorOf } from './tags.mjs';
 
 const LINES = {
   PHP_VERSION: /^ENV PHP_VERSION([ =])(\S+)$/,
@@ -32,13 +32,15 @@ function bumpUrl(url, from, to, key) {
   return url.replace(needle, `/php-${to}.`);
 }
 
-export function rewritePhpEnv(text, release) {
+// 上流の Dockerfile の版を、pin した版（release.version）に合わせる。上流の方が新しい（パッチ付きのタグが消えた）
+// ときは下げる方向にも差し替える。
+export function setPhpVersion(text, release) {
   assertStableVersion(release.version);
   const current = readPhpEnv(text);
   if (minorOf(current.version) !== minorOf(release.version)) {
     throw new Error(`PHP ${release.version} は上流の Dockerfile（${current.version}）と別の minor 系列`);
   }
-  if (compareVersions(current.version, release.version) >= 0) return { text, overridden: false };
+  if (current.version === release.version) return { text, overridden: false };
 
   const url = bumpUrl(current.url, current.version, release.version, 'PHP_URL');
   const ascUrl = bumpUrl(current.ascUrl, current.version, release.version, 'PHP_ASC_URL');

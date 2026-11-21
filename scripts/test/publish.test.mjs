@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pinsStale, decidePublish, tagsToApply, choosePhpBase, runVersions, pushTargetVersion, upstreamCommitOf, mustLandFor, canRedispatch } from '../lib/publish.mjs';
+import { pinsStale, decidePublish, tagsToApply, choosePhpBase } from '../lib/publish.mjs';
 
 const digest = (c) => `sha256:${c.repeat(64)}`;
 const versions = () => ({
@@ -11,39 +11,45 @@ const versions = () => ({
     frankenphp: { 'golang:1.27-trixie': digest('2') },
   },
   php: {
-    '8.6': { os: 'trixie', officialTag: '8.6-cli-trixie', officialDigest: digest('3') },
-    '8.5': { os: 'trixie', officialTag: '8.5-zts-trixie', officialDigest: digest('4') },
+    '8.6': { os: 'trixie', officialTag: '8.6.0-cli-trixie', officialDigest: digest('3') },
+    '8.5': { os: 'trixie', officialTag: '8.5.13-zts-trixie', officialDigest: digest('4') },
   },
 });
 
-test('php の古さは baseImages.php とその版の設定だけで決まる', () => {
-  const main = versions();
-  main.baseImages.php['debian:trixie-slim'] = digest('5');
-  assert.equal(pinsStale(versions(), main, 'php', '8.6'), true);
+test('php の古さは baseImages.php とその版の pin で決まる', () => {
+  for (const mutate of [
+    (v) => { v.baseImages.php['debian:trixie-slim'] = digest('5'); },
+    (v) => { v.php['8.6'].officialTag = '8.6.1-cli-trixie'; },
+  ]) {
+    const main = versions();
+    mutate(main);
+    assert.equal(pinsStale(versions(), main, 'php', '8.6'), true, mutate.toString());
+  }
 });
 
-// php イメージに関係しない pin まで比べると、FrankenPHP の更新だけで待機 run の php が公開されなくなる。
+// php イメージに関係しない pin まで比べると、FrankenPHP の更新だけで php が公開されなくなる。
 test('FrankenPHP の pin や別の版の更新では php は古くならない', () => {
   const main = versions();
   main.frankenphp.version = 'v1.14.1';
   main.baseImages.frankenphp['golang:1.27-trixie'] = digest('6');
-  main.php['8.5'].officialDigest = digest('7');
+  main.php['8.5'].officialTag = '8.5.14-zts-trixie';
   assert.equal(pinsStale(versions(), main, 'php', '8.6'), false);
 });
 
 // officialDigest はビルドのきっかけで、Dockerfile はビルド時点の library/php から取るので内容の入力ではない。
-test('officialDigest の更新では古くならない', () => {
-  const main = versions();
-  main.php['8.6'].officialDigest = digest('8');
-  assert.equal(pinsStale(versions(), main, 'php', '8.6'), false);
-  assert.equal(pinsStale(versions(), main, 'frankenphp', '8.6'), false);
+test('officialDigest の更新（null から埋まる場合を含む）では古くならない', () => {
+  const run = versions();
+  run.php['8.6'].officialDigest = null;
+  assert.equal(pinsStale(run, versions(), 'php', '8.6'), false);
+  assert.equal(pinsStale(run, versions(), 'frankenphp', '8.6'), false);
 });
 
-test('FrankenPHP の古さは FrankenPHP の pin と両方の baseImages で決まる', () => {
+test('FrankenPHP の古さは FrankenPHP の pin と両方の baseImages と php の pin で決まる', () => {
   for (const mutate of [
     (v) => { v.frankenphp.commit = 'b'.repeat(40); },
     (v) => { v.baseImages.frankenphp['golang:1.27-trixie'] = digest('9'); },
     (v) => { v.baseImages.php['debian:trixie-slim'] = digest('9'); },
+    (v) => { v.php['8.6'].officialTag = '8.6.1-cli-trixie'; },
   ]) {
     const main = versions();
     mutate(main);
@@ -57,148 +63,40 @@ test('キーの順序が違うだけなら古くない', () => {
   assert.equal(pinsStale(versions(), main, 'frankenphp', '8.6'), false);
 });
 
-test('push run: 新しければ移動タグを動かし、現行の方が新しければ固定タグだけ付ける', () => {
-  assert.equal(decidePublish({ current: { php: '8.6.0' }, candidate: { php: '8.6.1' }, mustLand: false, stale: false }), 'move');
-  assert.equal(decidePublish({ current: { php: '8.6.1' }, candidate: { php: '8.6.0' }, mustLand: false, stale: false }), 'keep');
+test('pin が main の先端と一致すれば固定タグと移動タグを付ける', () => {
+  assert.equal(decidePublish({ stale: false, runAttempt: '1' }), 'move');
+  assert.equal(decidePublish({ stale: false, runAttempt: '2' }), 'move');
 });
 
-// 古い pin で組んだ push run が、同じ版の固定タグや移動タグを新しい pin のビルドから巻き戻さないため。
-// main が先に進んでいれば後続の run が組み直すので、この run はタグに触れずに終える。
-test('push run: pin が main より古ければタグを付けない', () => {
-  assert.equal(decidePublish({ current: { php: '8.6.0' }, candidate: { php: '8.6.0' }, mustLand: false, stale: true }), 'skip');
+// 古い pin で組んだ run が、新しい pin のビルドを巻き戻さないため。main が先に進んでいれば、その push の run が組み直す。
+test('pin が古ければタグを付けない', () => {
+  assert.equal(decidePublish({ stale: true, runAttempt: '1' }), 'skip');
 });
 
-test('push run: 版の一方が上がり一方が下がるなら失敗', () => {
-  assert.throws(() => decidePublish({
-    current: { php: '8.6.0', frankenphp: 'v1.14.1' }, candidate: { php: '8.6.1', frankenphp: 'v1.14.0' }, mustLand: false, stale: false,
-  }), /一方/);
-});
-
-// 事件: 待機 run の 8.6.1 が、待機中に FrankenPHP の pin を進めた push run（8.6.0）に移動タグを取られ、
-// 警告だけで success になり、セキュリティ版がどの移動タグにも載らなかった。
-test('待機 run: 移動タグに載せられないなら失敗させる', () => {
-  assert.throws(() => decidePublish({ current: { php: '8.6.0' }, candidate: { php: '8.6.1' }, mustLand: true, stale: true }), /古い/);
-  assert.throws(() => decidePublish({
-    current: { php: '8.6.0', frankenphp: 'v1.14.1' }, candidate: { php: '8.6.1', frankenphp: 'v1.14.0' }, mustLand: true, stale: false,
-  }), /一方/);
-});
-
-test('待機 run: 現行が同じかそれ以上の版をすべて持っていれば、固定タグだけで成功にする', () => {
-  assert.equal(decidePublish({ current: { php: '8.6.2' }, candidate: { php: '8.6.1' }, mustLand: true, stale: false }), 'keep');
-  assert.equal(decidePublish({ current: null, candidate: { php: '8.6.1' }, mustLand: true, stale: false }), 'move');
+// 再実行（Re-run）した run には「後続の run が組み直す」前提が成り立たないので、skip で緑にせず失敗させる。
+test('再実行した run の pin が古ければ失敗', () => {
+  assert.throws(() => decidePublish({ stale: true, runAttempt: '2' }), /再実行/);
+  assert.throws(() => decidePublish({ stale: false, runAttempt: '' }), /RUN_ATTEMPT/);
 });
 
 test('付けるタグは判定で決まる', () => {
   const tags = { fixed: '8.6.1-cli-trixie', moving: '8.6-cli-trixie' };
   assert.deepEqual(tagsToApply('move', 'ghcr.io/x/php', tags), ['ghcr.io/x/php:8.6.1-cli-trixie', 'ghcr.io/x/php:8.6-cli-trixie']);
-  assert.deepEqual(tagsToApply('keep', 'ghcr.io/x/php', tags), ['ghcr.io/x/php:8.6.1-cli-trixie']);
   assert.deepEqual(tagsToApply('skip', 'ghcr.io/x/php', tags), []);
-  assert.throws(() => tagsToApply('conflict', 'ghcr.io/x/php', tags), /conflict/);
+  assert.throws(() => tagsToApply('keep', 'ghcr.io/x/php', tags), /keep/);
 });
 
 const record = (decision) => ({ decision, digest: digest('a'), phpVersion: '8.6.1' });
 
 test('php を作らなかった版の FrankenPHP は移動タグの php の上に組む', () => {
-  assert.deepEqual(choosePhpBase({ built: false, record: null, mustLand: false }), { source: 'moving' });
+  assert.deepEqual(choosePhpBase({ built: false, record: null }), { source: 'moving' });
 });
 
-test('この run で php を作るはずだった版に公開の結果が無ければ失敗', () => {
-  assert.throws(() => choosePhpBase({ built: true, record: null, mustLand: false }), /公開の結果/);
+test('この run で php を作った版は、その digest の上に組む', () => {
+  assert.deepEqual(choosePhpBase({ built: true, record: record('move') }), { source: 'own', digest: digest('a'), phpVersion: '8.6.1' });
 });
 
-test('push run: 移動タグを動かしたときだけ自分の php の上に組む', () => {
-  assert.deepEqual(choosePhpBase({ built: true, record: record('move'), mustLand: false }), { source: 'own', digest: digest('a'), phpVersion: '8.6.1' });
-  assert.deepEqual(choosePhpBase({ built: true, record: record('keep'), mustLand: false }), { source: 'moving' });
-  assert.deepEqual(choosePhpBase({ built: true, record: record('skip'), mustLand: false }), { source: 'moving' });
-});
-
-test('待機 run: FrankenPHP は必ず自分がビルドした php の上に組む', () => {
-  assert.deepEqual(choosePhpBase({ built: true, record: record('keep'), mustLand: true }), { source: 'own', digest: digest('a'), phpVersion: '8.6.1' });
-  assert.throws(() => choosePhpBase({ built: false, record: null, mustLand: true }), /待機/);
-});
-
-// 待機 run は pin だけを公開時点の main から取り、追うタグや os、platforms はディスパッチ時点の値でビルドする。
-// 古さの判定はこの「実際に使った値」で行うので、両者を合わせたものを作る。
-test('runVersions: ディスパッチ時点の設定に main の pin（baseImages と frankenphp）だけを重ねる', () => {
-  const dispatch = versions();
-  const main = versions();
-  main.baseImages.php['debian:trixie-slim'] = digest('b');
-  main.frankenphp.version = 'v1.14.1';
-  main.php['8.6'].officialTag = '8.6-cli-forky';
-  main.platforms = [];
-  const used = runVersions(dispatch, main);
-  assert.deepEqual(used.baseImages, main.baseImages);
-  assert.deepEqual(used.frankenphp, main.frankenphp);
-  assert.deepEqual(used.php, dispatch.php);
-  assert.deepEqual(used.platforms, dispatch.platforms);
-  // main で追うタグが変わっていれば、実際に使った値（ディスパッチ時点）と比べて古いと判定される。
-  assert.equal(pinsStale(used, main, 'php', '8.6'), true);
-});
-
-const commit = (c) => c.repeat(40);
-
-// 事件の筋書き: 待機 run が古い GitCommit の Dockerfile で 8.6.1 を作っている間に official が追いつき、
-// push run が新しい GitCommit で同じ 8.6.1 を先に公開した。版が同じなので move になり、待機 run の古い中身が上書きした。
-test('同じ版で、現行が最新の上流 commit・今回が古い commit なら、上書きしない', () => {
-  const commits = { candidate: commit('a'), current: commit('b'), latest: commit('b') };
-  assert.equal(decidePublish({ current: { php: '8.6.1' }, candidate: { php: '8.6.1' }, mustLand: true, stale: false, commits }), 'skip');
-  assert.equal(decidePublish({ current: { php: '8.6.1' }, candidate: { php: '8.6.1' }, mustLand: false, stale: false, commits }), 'skip');
-});
-
-test('今回が最新の上流 commit なら、同じ版でも上書きする（親イメージの更新を届ける）', () => {
-  const commits = { candidate: commit('b'), current: commit('a'), latest: commit('b') };
-  assert.equal(decidePublish({ current: { php: '8.6.1' }, candidate: { php: '8.6.1' }, mustLand: false, stale: false, commits }), 'move');
-});
-
-test('版が違えば上流 commit は見ない', () => {
-  const commits = { candidate: commit('a'), current: commit('b'), latest: commit('b') };
-  assert.equal(decidePublish({ current: { php: '8.6.0' }, candidate: { php: '8.6.1' }, mustLand: true, stale: false, commits }), 'move');
-});
-
-// 事件の筋書き: 待機 run が 8.6.1 を移動タグに載せた後（official はまだ 8.6.0）、debian の更新で push run が
-// 8.6.0 を組んで keep になり、親イメージの更新が移動タグに届かないまま緑で終わった。
-test('pushTargetVersion: 移動タグが official より新しければ、移動タグの版で組む', () => {
-  assert.equal(pushTargetVersion('8.6.0', '8.6.1'), '8.6.1');
-  assert.equal(pushTargetVersion('8.6.1', '8.6.1'), null);
-  assert.equal(pushTargetVersion('8.6.2', '8.6.1'), null);
-  assert.equal(pushTargetVersion('8.6.0', null), null);
-  assert.throws(() => pushTargetVersion('8.6.0', '8.7.0'), /minor/);
-});
-
-test('upstreamCommitOf: ラベルから上流の commit を読み、無ければ null', () => {
-  const img = (labels) => ({ 'linux/amd64': { config: { Labels: labels } }, 'linux/arm64': { config: { Labels: labels } } });
-  assert.equal(upstreamCommitOf(img({ 'dev.animalife.php-images.upstream-commit': commit('c') })), commit('c'));
-  assert.equal(upstreamCommitOf(img({})), null);
-  assert.equal(upstreamCommitOf(null), null);
-});
-
-// 再実行（Re-run）した run には「後続の run が組み直す」前提が成り立たないので、skip で緑にせず失敗させる。
-test('mustLandFor: 待機 run と再実行した run は移動タグに載せられなければ失敗', () => {
-  assert.equal(mustLandFor('wait', '1'), true);
-  assert.equal(mustLandFor('push', '1'), false);
-  assert.equal(mustLandFor('push', '2'), true);
-  assert.throws(() => mustLandFor('push', ''), /RUN_ATTEMPT/);
-});
-
-// 待機 run が公開の時点で古い pin と判定されたら、同じ版で dispatch し直す（新しい run は main の新しい pin で組む）。
-// 起動し直しが続いてループしないよう、回数に上限を置く。
-test('canRedispatch: 待機 run だけが、上限（3 回）まで起動し直せる', () => {
-  assert.equal(canRedispatch('wait', '0'), true);
-  assert.equal(canRedispatch('wait', '2'), true);
-  assert.equal(canRedispatch('wait', '3'), false);
-  assert.equal(canRedispatch('push', '0'), false);
-  assert.throws(() => canRedispatch('wait', 'x'), /回数/);
-});
-
-test('待機 run: 古い pin なら起動し直し、上限に達していれば失敗', () => {
-  assert.equal(decidePublish({ current: { php: '8.6.0' }, candidate: { php: '8.6.1' }, mustLand: true, stale: true, redispatch: true }), 'redispatch');
-  assert.throws(() => decidePublish({ current: { php: '8.6.0' }, candidate: { php: '8.6.1' }, mustLand: true, stale: true, redispatch: false }), /古い/);
-  assert.deepEqual(tagsToApply('redispatch', 'ghcr.io/x/php', { fixed: 'a', moving: 'b' }), []);
-});
-
-// conflict は pin を新しくしても直らないので、起動し直さずに失敗させる。
-test('待機 run: 版の一方が下がるときは起動し直さない', () => {
-  assert.throws(() => decidePublish({
-    current: { php: '8.6.0', frankenphp: 'v1.14.1' }, candidate: { php: '8.6.1', frankenphp: 'v1.14.0' }, mustLand: true, stale: false, redispatch: true,
-  }), /一方/);
+test('この run の php が公開されなかった・結果が無いなら失敗', () => {
+  assert.throws(() => choosePhpBase({ built: true, record: null }), /公開の結果/);
+  assert.throws(() => choosePhpBase({ built: true, record: record('skip') }), /公開されていない/);
 });

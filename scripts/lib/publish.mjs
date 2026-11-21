@@ -1,11 +1,10 @@
-import { canMoveTag, compareVersions, minorOf } from './tags.mjs';
-
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
   if (value === null || typeof value !== 'object') return value;
   return Object.fromEntries(Object.keys(value).sort().map((k) => [k, stable(value[k])]));
 }
 
+// officialDigest はビルドのきっかけで、Dockerfile はビルド時点の library/php から取るので内容の入力ではない。
 function relevantPins(versions, kind, minor) {
   const { officialDigest, ...entry } = versions.php?.[minor] ?? {};
   const php = { phpBase: versions.baseImages?.php ?? null, php: entry };
@@ -19,69 +18,27 @@ export function pinsStale(runVersions, mainVersions, kind, minor) {
   return a !== b;
 }
 
-export function decidePublish({ current, candidate, mustLand, stale, commits = null, redispatch = false }) {
-  if (stale) {
-    if (redispatch) return 'redispatch';
-    if (mustLand) throw new Error('この run がビルドに使った pin は main の先端より古いので、移動タグに載せられない。同じ版を指定して dispatch し直す');
-    return 'skip';
+// run は commit 順に直列で走るので、普段は move しかない。main が先へ進んでいれば後続の run が組み直すので、
+// この run はタグに触れない。再実行した run にはその前提が成り立たないので失敗にする。
+export function decidePublish({ stale, runAttempt }) {
+  if (!/^[1-9]\d*$/.test(runAttempt ?? '')) throw new Error(`RUN_ATTEMPT が不正: '${runAttempt}'`);
+  if (!stale) return 'move';
+  if (runAttempt !== '1') {
+    throw new Error('再実行した run の pin は main の先端より古いので公開しない。main の先端で版を指定しない workflow_dispatch を走らせる');
   }
-  const sameVersions = current !== null && Object.keys(candidate).every((k) => candidate[k] === current[k]);
-  if (sameVersions && commits && commits.candidate !== commits.latest && commits.current === commits.latest) {
-    return 'skip';
-  }
-  const decision = canMoveTag(current, candidate);
-  if (decision === 'conflict') {
-    throw new Error(`現行（${JSON.stringify(current)}）と今回（${JSON.stringify(candidate)}）で、版の一方が上がり一方が下がる。新しい方の PHP の版を指定して dispatch する`);
-  }
-  return decision;
+  return 'skip';
 }
 
 export function tagsToApply(decision, image, { fixed, moving }) {
   if (decision === 'move') return [`${image}:${fixed}`, `${image}:${moving}`];
-  if (decision === 'keep') return [`${image}:${fixed}`];
-  if (decision === 'skip' || decision === 'redispatch') return [];
+  if (decision === 'skip') return [];
   throw new Error(`判定が不正: ${decision}`);
 }
 
-export function choosePhpBase({ built, record, mustLand }) {
-  if (!built) {
-    if (mustLand) throw new Error('待機 run なのに、この版の php をビルドしていない');
-    return { source: 'moving' };
-  }
+// FrankenPHP の php-base: この run で php をビルドした版はその digest、しなかった版は移動タグの php。
+export function choosePhpBase({ built, record }) {
+  if (!built) return { source: 'moving' };
   if (record === null) throw new Error('この run で php をビルドするはずだったが、公開の結果が無い');
-  if (mustLand || record.decision === 'move') return { source: 'own', digest: record.digest, phpVersion: record.phpVersion };
-  return { source: 'moving' };
-}
-
-export function runVersions(dispatch, main) {
-  return { ...dispatch, baseImages: main.baseImages, frankenphp: main.frankenphp };
-}
-
-export function pushTargetVersion(officialVersion, movingVersion) {
-  if (movingVersion === null) return null;
-  if (minorOf(officialVersion) !== minorOf(movingVersion)) {
-    throw new Error(`移動タグの PHP ${movingVersion} が上流の Dockerfile（${officialVersion}）と別の minor`);
-  }
-  return compareVersions(movingVersion, officialVersion) > 0 ? movingVersion : null;
-}
-
-const UPSTREAM_COMMIT_LABEL = 'dev.animalife.php-images.upstream-commit';
-
-export function upstreamCommitOf(image) {
-  if (image === null || typeof image !== 'object') return null;
-  const configs = image.config ? [image] : Object.values(image);
-  const values = [...new Set(configs.map((c) => c?.config?.Labels?.[UPSTREAM_COMMIT_LABEL] ?? null))];
-  return values.length === 1 ? values[0] : null;
-}
-
-export function mustLandFor(runKind, runAttempt) {
-  if (!/^[1-9]\d*$/.test(runAttempt ?? '')) throw new Error(`RUN_ATTEMPT が不正: '${runAttempt}'`);
-  return runKind === 'wait' || runAttempt !== '1';
-}
-
-export const MAX_REDISPATCH = 3;
-
-export function canRedispatch(runKind, count) {
-  if (!/^\d+$/.test(count ?? '')) throw new Error(`起動し直した回数が不正: '${count}'`);
-  return runKind === 'wait' && Number(count) < MAX_REDISPATCH;
+  if (record.decision !== 'move') throw new Error(`この run の php は公開されていない（${record.decision}）`);
+  return { source: 'own', digest: record.digest, phpVersion: record.phpVersion };
 }

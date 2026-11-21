@@ -127,17 +127,24 @@ jobs:
           # コマンド置換の中の jq の失敗は for では拾えないので、先に変数へ取って検査する。
           minors="$(jq -er '.php | keys[]' versions.json)"
           for minor in ${minors}; do
-            tag="$(jq -r --arg m "${minor}" '.php[$m].officialTag' versions.json)"
-            os="$(jq -r --arg m "${minor}" '.php[$m].os' versions.json)"
+            : > "${out}"
+            GITHUB_OUTPUT="${out}" MINOR="${minor}" node scripts/php-pin.mjs
+            php_version="$(sed -n 's/^phpVersion=//p' "${out}")"
+            tag="$(sed -n 's/^officialTag=//p' "${out}")"
+            moving="$(sed -n 's/^movingTag=//p' "${out}")"
+            os="$(sed -n 's/^os=//p' "${out}")"
             echo "::group::php ${minor}（${tag}）"
             : > "${out}"
-            GITHUB_OUTPUT="${out}" LIBRARY_FILE="${RUNNER_TEMP}/library-php" OFFICIAL_TAG="${tag}" node scripts/resolve-official.mjs
+            GITHUB_OUTPUT="${out}" LIBRARY_FILE="${RUNNER_TEMP}/library-php" OFFICIAL_TAG="${tag}" MOVING_TAG="${moving}" \
+              node scripts/resolve-official.mjs
             commit="$(sed -n 's/^gitCommit=//p' "${out}")"
             directory="$(sed -n 's/^directory=//p' "${out}")"
             src="${RUNNER_TEMP}/php-${minor}"
             git init -q "${src}"
             git -C "${src}" fetch -q --depth 1 https://github.com/docker-library/php.git "${commit}"
             git -C "${src}" checkout -q FETCH_HEAD -- "${directory}"
+            # build.yml と同じく、Dockerfile の版を pin に合わせる（夜のジョブの PR のように公式イメージがまだ無い版もここで通す）。
+            GITHUB_OUTPUT=/dev/null DOCKERFILE="${src}/${directory}/Dockerfile" PHP_VERSION="${php_version}" node scripts/rewrite-php-dockerfile.mjs
             : > "${out}"
             GITHUB_OUTPUT="${out}" KIND=php DOCKERFILE="${src}/${directory}/Dockerfile" node scripts/pin-base-images.mjs
             pin_json="$(sed -n 's/^args=//p' "${out}")"
@@ -147,10 +154,8 @@ jobs:
               echo "::error::親イメージの pin の引数が ${#pin_args[@]} 個で、${pin_count} 個ではない"
               exit 1
             fi
-            # 待機の経路で差し替える 3 行が上流の現物にあるか（RELEASE_FILE が空なら読むだけ）。
-            GITHUB_OUTPUT=/dev/null DOCKERFILE="${src}/${directory}/Dockerfile" RELEASE_FILE='' node scripts/rewrite-php-dockerfile.mjs
             echo "::endgroup::"
-            echo "::group::smoke build php ${minor}（linux/amd64、push しない）"
+            echo "::group::smoke build php ${php_version}（linux/amd64、push しない）"
             docker buildx build "${src}/${directory}" "${pin_args[@]}" --platform linux/amd64 --pull --provenance=false \
               --output type=cacheonly
             echo "::endgroup::"
@@ -158,7 +163,7 @@ jobs:
             target="runner-php-${minor//./-}-${os}"
             (cd frankenphp && PHP_VERSION="${minor}" SHA='' docker buildx bake --print "${target}") > "${RUNNER_TEMP}/bake.json"
             (cd frankenphp && GITHUB_OUTPUT=/dev/null KIND=frankenphp BAKE_FILE="${RUNNER_TEMP}/bake.json" TARGET="${target}" \
-              EXPECTED_PHP_BASE="docker-image://php:${tag}" VERSIONS_FILE="${GITHUB_WORKSPACE}/versions.json" \
+              EXPECTED_PHP_BASE="docker-image://php:${moving}" VERSIONS_FILE="${GITHUB_WORKSPACE}/versions.json" \
               node ../scripts/pin-base-images.mjs)
             echo "::endgroup::"
           done

@@ -1,5 +1,3 @@
-import { compareVersions, minorOf } from './tags.mjs';
-
 const STABLE_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 export function assertStableVersion(version) {
@@ -46,15 +44,6 @@ export async function waitForRelease({
 
 export function finishWait(result, version) {
   if (result.status === 'found') return result.release;
-  if (result.status === 'timeout') throw new Error(`PHP ${version} は期限までに公開されなかった。ビルドしていない`);
+  if (result.status === 'timeout') throw new Error(`PHP ${version} は期限までに公開されなかった。versions.json は上げていない`);
   throw new Error(`期限までに php.net を確認できなかった: ${result.message}`);
-}
-
-export function checkWaitTarget(target, moving) {
-  assertStableVersion(target);
-  if (moving === null) return;
-  if (minorOf(target) !== minorOf(moving)) throw new Error(`PHP ${target} は移動タグの ${moving} と別の minor`);
-  if (compareVersions(target, moving) <= 0) throw new Error(`PHP ${target} は移動タグの ${moving} より大きくない`);
-  const gap = Number(target.split('.')[2]) - Number(moving.split('.')[2]);
-  if (gap > 3) throw new Error(`PHP ${target} は移動タグの ${moving} から 3 パッチより先。打ち間違いでないか確かめる`);
 }

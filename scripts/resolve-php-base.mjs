@@ -6,23 +6,26 @@ import { env, main, setOutput } from './lib/gha.mjs';
 
 main(async () => {
   const minor = env('MINOR');
+  const pinned = env('PHP_VERSION');
   const built = JSON.parse(env('PHP_VERSIONS')).includes(minor);
   const recordFile = env('RECORD_FILE');
   const record = existsSync(recordFile) ? JSON.parse(readFileSync(recordFile, 'utf8')) : null;
-  const choice = choosePhpBase({ built, record, mustLand: env('RUN_KIND') === 'wait' });
+  const choice = choosePhpBase({ built, record });
 
   let base;
   if (choice.source === 'own') {
     base = { digest: choice.digest, phpVersion: choice.phpVersion };
     console.log(`この run でビルドした php を使う: ${base.digest}（PHP ${base.phpVersion}）`);
   } else {
-    const ref = `${env('PHP_IMAGE')}:${env('OFFICIAL_TAG')}`;
+    const ref = `${env('PHP_IMAGE')}:${env('MOVING_TAG')}`;
     const manifest = inspectImage(ref, '{{json .Manifest}}');
     if (manifest === null) throw new Error(`${ref} が無い`);
-    base = { digest: manifest.digest, phpVersion: currentFromImage(inspectImage(`${env('PHP_IMAGE')}@${manifest.digest}`, '{{json .Image}}'), ['php']).php };
+    const config = inspectImage(`${env('PHP_IMAGE')}@${manifest.digest}`, '{{json .Image}}');
+    base = { digest: manifest.digest, phpVersion: currentFromImage(config, ['php']).php };
     console.log(`現行の ${ref} を使う: ${base.digest}（PHP ${base.phpVersion}）`);
   }
   if (!/^sha256:[0-9a-f]{64}$/.test(base.digest ?? '')) throw new Error(`php の digest が不正: ${base.digest}`);
+  if (base.phpVersion !== pinned) throw new Error(`php-base の PHP（${base.phpVersion}）が pin（${pinned}）と違う`);
   writeFileSync(env('OUT_FILE'), JSON.stringify(base));
   setOutput('digest', base.digest);
   setOutput('phpVersion', base.phpVersion);

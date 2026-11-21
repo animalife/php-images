@@ -12,25 +12,19 @@ on:
   workflow_dispatch:
     inputs:
       php-version:
-        description: '公開を待ってビルドする PHP の版（例 8.6.1）。空なら全版をビルドし直す'
+        description: '公開を待つ PHP の版（例 8.6.1）。公開されたら versions.json を上げる PR を作る（この run では公開しない）。空なら全版をビルドし直す'
         required: false
         type: string
         default: ''
-      redispatch-count:
-        description: '待機 run が古い pin のために起動し直された回数（自動で付く。手で dispatch するときは 0 のまま）'
-        required: false
-        type: string
-        default: '0'
 
 permissions: {}
 
 concurrency:
-  # 待機する run（最大 6 時間）は版ごとに分け、普段のビルドを止めない。
-  # 公開（タグの書き込み）は各 publish ジョブの concurrency で版ごとに直列にする。
+  # 夜のジョブ（最大 6 時間待つ）は版ごとに分け、普段のビルドを止めない。夜のジョブは公開しないので、
+  # 公開するのは build グループの run だけで、これは commit 順に直列で走る。
   group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.php-version != '' && format('wait-{0}', inputs.php-version) || 'build' }}
   cancel-in-progress: false
-  # 既定（queue: single）では 3 本目の push で 2 本目の pending が黙って置き換わり、
-  # その push の変更がどの run でもビルドされない（plan は event.before との差分で決めるため）。
+  # 既定（queue: single）では 3 本目の push で 2 本目の pending が黙って置き換わる。
   queue: max
 
 env:
@@ -55,7 +49,6 @@ jobs:
       frankenphpCommit: ${{ steps.plan.outputs.frankenphpCommit }}
       platformCount: ${{ steps.plan.outputs.platformCount }}
       waitFor: ${{ steps.plan.outputs.waitFor }}
-      redispatchCount: ${{ steps.plan.outputs.redispatchCount }}
     steps:
       # dispatch した ref の workflow ファイルが実行されるので、ブランチ上で外せば素通りできる
       # （強制力のある境界ではなく誤操作のガード）。skip ではなく失敗にして誤 ref に気付けるようにする。
@@ -67,7 +60,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # push の差分を event.before と比べるため、履歴を全部取る。
+          # push の差分を最後に成功した push run と比べるため、履歴を全部取る。
           fetch-depth: 0
           persist-credentials: false
 
@@ -95,13 +88,13 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           PHP_VERSION_INPUT: ${{ inputs.php-version }}
-          REDISPATCH_COUNT_INPUT: ${{ inputs.redispatch-count }}
           BEFORE_SHA: ${{ steps.base.outputs.sha }}
         run: node scripts/plan.mjs
 
       - name: Verify FrankenPHP tag points at the pinned commit
         run: node scripts/verify-frankenphp-pin.mjs
 
+  # 夜のジョブ: php.net で版が公開されるのを待つ。この run では公開しない。
   wait:
     name: Wait for php.net release
     needs: plan
@@ -110,11 +103,6 @@ jobs:
     timeout-minutes: 360
     permissions:
       contents: read # checkout に必要
-      packages: read # 移動タグの php の版を読むのに必要
-    outputs:
-      found: ${{ steps.wait.outputs.found }}
-      frankenphpVersion: ${{ steps.pin.outputs.version }}
-      frankenphpCommit: ${{ steps.pin.outputs.commit }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,24 +113,8 @@ jobs:
           node-version-file: .node-version
           package-manager-cache: false
 
-      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # 版の打ち間違いを、待ち始める前に止める（移動タグより大きく、+3 パッチ以内）。起動し直した run では、
-      # 前の run が php の移動タグをすでに動かしていることがあるので確かめない（版は最初の run で確かめ済み）。
-      - name: Check the requested version
-        if: ${{ needs.plan.outputs.redispatchCount == '0' }}
-        env:
-          PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
-          OFFICIAL_TAG: ${{ fromJSON(needs.plan.outputs.phpPublishes)[0].officialTag }}
-        run: node scripts/check-wait-target.mjs
-
       # 期限は job の timeout-minutes より手前に置き、未公開なら自分で失敗させて理由を残す。
       - name: Wait
-        id: wait
         env:
           PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
           RELEASE_FILE: ${{ runner.temp }}/php-release.json
@@ -150,52 +122,65 @@ jobs:
           DEADLINE_SECONDS: '20700'
         run: node scripts/wait-php-release.mjs
 
-      # 待つ間に Renovate が pin（FrankenPHP・親イメージ）を進めていたら、公開時点の main の pin でビルドする。
-      # dispatch 時点の pin のまま作ると、先に移動タグを取った新しいビルドと食い違うか、親イメージの更新を巻き戻す。
-      # 追うタグや os などはディスパッチ時点の値のままなので、実際に使う値を run-versions.json にまとめ、以降の判定もこれで行う。
-      - name: Re-read pins from main
-        id: pin
-        if: ${{ steps.wait.outputs.found == 'true' }}
+  # 公開されたら、最新の main から versions.json のパッチ版を上げる PR を作り、auto-merge（マージキュー）に入れる。
+  # その後は普段の CI → マージ → push の run で公開される。
+  # GITHUB_TOKEN で作った PR では CI が起きないので、この repo だけに入れた App のトークンを使う。
+  # App のトークンを持つこのジョブでは、上流のコードやダウンロードしたものを実行しない（自分のスクリプトだけ）。
+  bump:
+    name: Open a version bump PR
+    needs: [plan, wait]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # 秘密鍵は environment の secret に置き、デプロイブランチを main に限る。
+    environment: version-bump
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      # 変数が空だと create-github-app-token の失敗の理由が分かりにくいので、先に止める。
+      - name: Check the App client ID
         env:
-          DISPATCH_VERSIONS_FILE: versions.json
-          MAIN_VERSIONS_FILE: ${{ runner.temp }}/main-versions.json
-          OUT_FILE: ${{ runner.temp }}/run-versions.json
-          VERSIONS_FILE: ${{ runner.temp }}/run-versions.json
+          CLIENT_ID: ${{ vars.VERSION_BUMP_APP_CLIENT_ID }}
         run: |
-          set -euo pipefail
-          git fetch --depth 1 origin main
-          git show FETCH_HEAD:versions.json > "${MAIN_VERSIONS_FILE}"
-          node scripts/run-versions.mjs
-          node scripts/verify-frankenphp-pin.mjs
+          if [ -z "${CLIENT_ID}" ]; then
+            echo "::error::repository variable VERSION_BUMP_APP_CLIENT_ID が空"
+            exit 1
+          fi
 
-      - name: Upload versions snapshot
-        if: ${{ steps.wait.outputs.found == 'true' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      - name: Get GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          name: versions-snapshot
-          path: ${{ runner.temp }}/run-versions.json
-          if-no-files-found: error
-          retention-days: 7
+          # App を作り直しても、ワークフローを変えずに差し替えられるよう variable で受ける（Client ID は秘密ではない）。
+          client-id: ${{ vars.VERSION_BUMP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.VERSION_BUMP_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
 
-      - name: Upload release info
-        if: ${{ steps.wait.outputs.found == 'true' }}
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: php-release
-          path: ${{ runner.temp }}/php-release.json
-          if-no-files-found: error
-          retention-days: 7
+      - name: Open the PR
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node scripts/bump-php-version.mjs
 
   # 両アーキを同じ Dockerfile でビルドするため、取得と差し替えは版ごとに 1 回だけ行い、コンテキストを配る。
   php-prepare:
     name: Prepare php ${{ matrix.version }}
-    needs: [plan, wait]
-    if: ${{ !failure() && !cancelled() && needs.plan.outputs.phpVersions != '[]' && (needs.wait.result == 'skipped' || needs.wait.outputs.found == 'true') }}
+    needs: plan
+    if: ${{ needs.plan.outputs.phpVersions != '[]' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read # checkout に必要
-      packages: read # 移動タグの php の版を読むのに必要
     strategy:
       fail-fast: false
       matrix:
@@ -209,20 +194,6 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
-
-      - name: Download release info
-        if: ${{ needs.wait.outputs.found == 'true' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: php-release
-          path: ${{ runner.temp }}/release
-
-      - name: Download versions snapshot
-        if: ${{ needs.wait.outputs.found == 'true' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: versions-snapshot
-          path: ${{ runner.temp }}/snapshot
 
       # raw.githubusercontent.com は使わない。cache-control: max-age=300 で最大 5 分古い内容が返る
       # （2026-11-21、curl -sI https://raw.githubusercontent.com/docker-library/official-images/HEAD/library/php で確認）。
@@ -238,6 +209,7 @@ jobs:
         env:
           LIBRARY_FILE: ${{ runner.temp }}/library-php
           OFFICIAL_TAG: ${{ matrix.officialTag }}
+          MOVING_TAG: ${{ matrix.movingTag }}
         run: node scripts/resolve-official.mjs
 
       - name: Checkout docker-library/php
@@ -250,27 +222,13 @@ jobs:
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
-      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        if: ${{ needs.wait.outputs.found != 'true' }}
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Follow the moving tag
-        id: target
-        if: ${{ needs.wait.outputs.found != 'true' }}
-        env:
-          DOCKERFILE: upstream/${{ steps.resolve.outputs.directory }}/Dockerfile
-          OFFICIAL_TAG: ${{ matrix.officialTag }}
-          OUT_FILE: ${{ runner.temp }}/moving-release.json
-        run: node scripts/push-target.mjs
-
-      - name: Override PHP version
+      # Dockerfile の版を versions.json の pin に合わせる（違えば php.net の情報で PHP_VERSION / URL / SHA256 だけ差し替える）。
+      # 合わせた後の PHP_VERSION が pin と一致しなければ止まる。
+      - name: Set PHP version to the pin
         id: rewrite
         env:
           DOCKERFILE: upstream/${{ steps.resolve.outputs.directory }}/Dockerfile
-          RELEASE_FILE: ${{ needs.wait.outputs.found == 'true' && format('{0}/release/php-release.json', runner.temp) || steps.target.outputs.releaseFile }}
+          PHP_VERSION: ${{ matrix.phpVersion }}
         run: node scripts/rewrite-php-dockerfile.mjs
 
       - name: Pin base images
@@ -278,7 +236,6 @@ jobs:
         env:
           KIND: php
           DOCKERFILE: upstream/${{ steps.resolve.outputs.directory }}/Dockerfile
-          VERSIONS_FILE: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || '' }}
         run: node scripts/pin-base-images.mjs
 
       # ディレクトリをそのまま upload しない。upload-artifact はファイルモードを保たず、docker-php-* の実行ビットが落ちる
@@ -465,18 +422,11 @@ jobs:
 
   php-publish:
     name: Publish php ${{ matrix.version }}
-    needs: [plan, wait, php-test]
+    needs: [plan, php-test]
     # どれか 1 つのアーキの検査が落ちたら、その run のタグ付けは全部止める。
     if: ${{ !cancelled() && needs.php-test.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    outputs:
-      # 待機 run は版が 1 つなので、matrix の出力が上書きされることはない。
-      redispatch: ${{ steps.publish.outputs.decision == 'redispatch' }}
-    concurrency:
-      group: publish-php-${{ matrix.version }}
-      cancel-in-progress: false
-      queue: max
     # 誤操作のガード: main に限るデプロイブランチの制限で、ブランチから dispatch した run の公開を止める。
     # 書き込み権限者がブランチ上でこの行を外せば素通りできるので、境界ではない（境界は消費側の attestation の検証）。
     environment: ghcr-publish
@@ -514,14 +464,6 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 待機 run がビルドに使った値（run-versions.json）。
-      - name: Download versions snapshot
-        if: ${{ needs.wait.outputs.found == 'true' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: versions-snapshot
-          path: ${{ runner.temp }}/snapshot
-
       - name: Publish
         id: publish
         uses: $/.github/actions/publish-image
@@ -531,12 +473,7 @@ jobs:
           expected-count: ${{ needs.plan.outputs.platformCount }}
           staging-tag: staging-${{ matrix.version }}
           kind: php
-          os: ${{ matrix.os }}
-          official-tag: ${{ matrix.officialTag }}
-          run-kind: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
-          run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || 'versions.json' }}
           minor: ${{ matrix.version }}
-          redispatch-count: ${{ needs.plan.outputs.redispatchCount }}
 
       # FrankenPHP のビルドが php-base を決めるのに使う（scripts/lib/publish.mjs の choosePhpBase）。
       - name: Save publish record
@@ -561,11 +498,10 @@ jobs:
   # その間に別の run が移動タグを動かしたとき、アーキで違う php の上に組まれる）。
   frankenphp-prepare:
     name: Prepare frankenphp ${{ matrix.version }}
-    needs: [plan, wait, php-publish]
+    needs: [plan, php-publish]
     # php のジョブが skipped（FrankenPHP の pin だけの更新）でも走らせる。
     # needs だけだと依存先が skipped のとき後続も skipped になる。
-    # php を起動し直しに回したときは、FrankenPHP も起動し直した run に任せる。
-    if: ${{ !failure() && !cancelled() && needs.plan.outputs.frankenphpBuilds != '[]' && (needs.wait.result == 'skipped' || needs.wait.outputs.found == 'true') && needs.php-publish.outputs.redispatch != 'true' }}
+    if: ${{ !failure() && !cancelled() && needs.plan.outputs.frankenphpBuilds != '[]' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -600,9 +536,9 @@ jobs:
       - name: Resolve php base
         env:
           MINOR: ${{ matrix.version }}
-          OFFICIAL_TAG: ${{ matrix.officialTag }}
+          PHP_VERSION: ${{ matrix.phpVersion }}
+          MOVING_TAG: ${{ matrix.movingTag }}
           PHP_VERSIONS: ${{ needs.plan.outputs.phpVersions }}
-          RUN_KIND: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
           RECORD_FILE: ${{ runner.temp }}/php-digest/${{ matrix.version }}.json
           OUT_FILE: ${{ runner.temp }}/php-base/php-base.json
         run: |
@@ -618,7 +554,7 @@ jobs:
 
   frankenphp-build:
     name: Build frankenphp ${{ matrix.slug }}
-    needs: [plan, wait, frankenphp-prepare]
+    needs: [plan, frankenphp-prepare]
     if: ${{ !cancelled() && needs.frankenphp-prepare.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
@@ -646,16 +582,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: php/frankenphp
-          ref: ${{ needs.wait.outputs.frankenphpCommit || needs.plan.outputs.frankenphpCommit }}
+          ref: ${{ needs.plan.outputs.frankenphpCommit }}
           path: frankenphp
           persist-credentials: false
-
-      - name: Download versions snapshot
-        if: ${{ needs.wait.outputs.found == 'true' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: versions-snapshot
-          path: ${{ runner.temp }}/snapshot
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -690,17 +619,15 @@ jobs:
         env:
           MINOR: ${{ matrix.version }}
           OS: ${{ matrix.os }}
-          OFFICIAL_TAG: ${{ matrix.officialTag }}
+          MOVING_TAG: ${{ matrix.movingTag }}
           KIND: frankenphp
           BAKE_FILE: ${{ runner.temp }}/bake.json
-          SNAPSHOT: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || '' }}
         run: |
           set -euo pipefail
           target="runner-php-${MINOR//./-}-${OS}"
-          versions_file="${SNAPSHOT:-${PWD}/versions.json}"
           (cd frankenphp && PHP_VERSION="${MINOR}" SHA='' docker buildx bake --print "${target}") > "${BAKE_FILE}"
-          (cd frankenphp && TARGET="${target}" EXPECTED_PHP_BASE="docker-image://php:${OFFICIAL_TAG}" \
-            VERSIONS_FILE="${versions_file}" node ../scripts/pin-base-images.mjs)
+          (cd frankenphp && TARGET="${target}" EXPECTED_PHP_BASE="docker-image://php:${MOVING_TAG}" \
+            VERSIONS_FILE="${GITHUB_WORKSPACE}/versions.json" node ../scripts/pin-base-images.mjs)
           echo "target=${target}" >> "${GITHUB_OUTPUT}"
 
       - name: Build OCI archive
@@ -710,8 +637,8 @@ jobs:
           SLUG: ${{ matrix.slug }}
           PHP_DIGEST: ${{ steps.php.outputs.digest }}
           PHP_VERSION: ${{ matrix.version }}
-          VERSION: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}
-          SHA: ${{ needs.wait.outputs.frankenphpCommit || needs.plan.outputs.frankenphpCommit }}
+          VERSION: ${{ needs.plan.outputs.frankenphpVersion }}
+          SHA: ${{ needs.plan.outputs.frankenphpCommit }}
           LATEST: 'false'
           # 上流 docker-bake.hcl の secret に渡る。
           GITHUB_TOKEN: ${{ github.token }}
@@ -816,7 +743,7 @@ jobs:
 
   frankenphp-test:
     name: Test frankenphp ${{ matrix.slug }}
-    needs: [plan, wait, frankenphp-push]
+    needs: [plan, frankenphp-push]
     if: ${{ !cancelled() && needs.frankenphp-push.result == 'success' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
@@ -852,7 +779,7 @@ jobs:
       - name: Test
         env:
           SLUG: ${{ matrix.slug }}
-          FRANKENPHP_VERSION: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}
+          FRANKENPHP_VERSION: ${{ needs.plan.outputs.frankenphpVersion }}
         run: |
           set -euo pipefail
           digest="$(cat "${RUNNER_TEMP}/digest/${SLUG}")"
@@ -882,16 +809,10 @@ jobs:
 
   frankenphp-publish:
     name: Publish frankenphp ${{ matrix.version }}
-    needs: [plan, wait, frankenphp-test]
+    needs: [plan, frankenphp-test]
     if: ${{ !cancelled() && needs.frankenphp-test.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    outputs:
-      redispatch: ${{ steps.publish.outputs.decision == 'redispatch' }}
-    concurrency:
-      group: publish-frankenphp-${{ matrix.version }}
-      cancel-in-progress: false
-      queue: max
     # 誤操作のガード: main に限るデプロイブランチの制限で、ブランチから dispatch した run の公開を止める。
     # 書き込み権限者がブランチ上でこの行を外せば素通りできるので、境界ではない（境界は消費側の attestation の検証）。
     environment: ghcr-publish
@@ -927,14 +848,6 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 待機 run がビルドに使った値（run-versions.json）。
-      - name: Download versions snapshot
-        if: ${{ needs.wait.outputs.found == 'true' }}
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: versions-snapshot
-          path: ${{ runner.temp }}/snapshot
-
       - name: Publish
         id: publish
         uses: $/.github/actions/publish-image
@@ -944,49 +857,14 @@ jobs:
           expected-count: ${{ needs.plan.outputs.platformCount }}
           staging-tag: staging-php${{ matrix.version }}-${{ matrix.os }}
           kind: frankenphp
-          os: ${{ matrix.os }}
-          official-tag: ${{ matrix.officialTag }}
-          frankenphp-version: ${{ needs.wait.outputs.frankenphpVersion || needs.plan.outputs.frankenphpVersion }}
-          run-kind: ${{ needs.wait.outputs.found == 'true' && 'wait' || 'push' }}
-          run-versions-file: ${{ needs.wait.outputs.found == 'true' && format('{0}/snapshot/run-versions.json', runner.temp) || 'versions.json' }}
           minor: ${{ matrix.version }}
-          redispatch-count: ${{ needs.plan.outputs.redispatchCount }}
-
-  # 待機 run が公開の時点で古い pin と判定されたら、同じ版で build.yml を dispatch し直す。新しい run は main の新しい pin で
-  # 組み、php.net にはもう版が出ているのですぐビルドに入る。回数の上限は scripts/lib/publish.mjs の MAX_REDISPATCH。
-  # GITHUB_TOKEN による workflow_dispatch は新しい run を作れる（GITHUB_TOKEN のイベントで workflow が起きない規則の例外）。
-  redispatch:
-    name: Redispatch with the latest pins
-    needs: [plan, php-publish, frankenphp-publish]
-    if: ${{ always() && github.ref == 'refs/heads/main' && (needs.php-publish.outputs.redispatch == 'true' || needs.frankenphp-publish.outputs.redispatch == 'true') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    permissions:
-      actions: write # workflow_dispatch に必要
-    steps:
-      - name: Dispatch build.yml again
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PHP_VERSION: ${{ needs.plan.outputs.waitFor }}
-          COUNT: ${{ needs.plan.outputs.redispatchCount }}
-        run: |
-          set -euo pipefail
-          next=$((COUNT + 1))
-          gh workflow run build.yml --repo "${GITHUB_REPOSITORY}" --ref main -f php-version="${PHP_VERSION}" -f redispatch-count="${next}"
-          echo "::notice::pin が main の先端より古かったので、PHP ${PHP_VERSION} を新しい pin で組む run を起動し直した（${next} 回目）。結果は新しい run で確かめる"
-          {
-            echo "### 起動し直した"
-            echo ""
-            echo "pin が main の先端より古かったので、PHP ${PHP_VERSION} を新しい pin で組む run を起動し直した（${next} 回目）。"
-            echo "この run はタグを付けていない。結果は Actions の一覧にある新しい run で確かめる。"
-          } >> "${GITHUB_STEP_SUMMARY}"
 
   # 失敗の通知は run を起動した actor にしか届かず、Renovate の自動マージやマージキュー経由の run では人に届く保証が無い。
   # main の run でどれかのジョブが failure / cancelled になったら Issue に残す。同じ原因で乱立しないよう、
   # 開いている同名の Issue があればコメントを足すだけにする。
   notify-failure:
     name: Notify failure
-    needs: [plan, wait, php-prepare, php-build, php-test, php-publish, frankenphp-prepare, frankenphp-build, frankenphp-push, frankenphp-test, frankenphp-publish, redispatch]
+    needs: [plan, wait, bump, php-prepare, php-build, php-test, php-publish, frankenphp-prepare, frankenphp-build, frankenphp-push, frankenphp-test, frankenphp-publish]
     if: ${{ always() && github.ref == 'refs/heads/main' && (contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5

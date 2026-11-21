@@ -20,24 +20,13 @@ export function minorOf(version) {
   return `${major}.${minor}`;
 }
 
-export function phpTags({ phpVersion, officialTag, os }) {
-  const m = /^(\d+\.\d+)-([a-z]+)-([a-z]+)$/.exec(officialTag);
-  if (!m || m[3] !== os) throw new Error(`追うタグが <minor>-<variant>-${os} の形ではない: ${officialTag}`);
-  if (minorOf(phpVersion) !== m[1]) throw new Error(`PHP ${phpVersion} が追うタグ ${officialTag} の minor と違う`);
-  return { fixed: `${phpVersion}-${m[2]}-${os}`, moving: officialTag };
+export function phpTags({ phpVersion, variant, os }) {
+  return { fixed: `${phpVersion}-${variant}-${os}`, moving: `${minorOf(phpVersion)}-${variant}-${os}` };
 }
 
 export function frankenphpTags({ frankenphpVersion, phpVersion, os }) {
   const fp = parts(frankenphpVersion).join('.');
   return { fixed: `${fp}-php${phpVersion}-${os}`, moving: `php${minorOf(phpVersion)}-${os}` };
-}
-
-export function canMoveTag(current, candidate) {
-  if (current === null) return 'move';
-  const cmp = Object.keys(candidate).map((key) => compareVersions(candidate[key], current[key]));
-  if (cmp.every((c) => c >= 0)) return 'move';
-  if (cmp.every((c) => c <= 0)) return 'keep';
-  return 'conflict';
 }
 
 function readOne(image, keys) {

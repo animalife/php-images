@@ -36,8 +36,5 @@ main(async () => {
   setOutput('frankenphpVersion', after.frankenphp.version);
   setOutput('frankenphpCommit', after.frankenphp.commit);
   setOutput('platformCount', String(after.platforms.length));
-  const redispatchCount = env('REDISPATCH_COUNT_INPUT', { optional: true }) || '0';
-  if (!/^\d+$/.test(redispatchCount)) throw new Error(`redispatch-count が 0 以上の整数ではない: '${redispatchCount}'`);
-  setOutput('redispatchCount', redispatchCount);
   console.log(JSON.stringify(plan, null, 2));
 });

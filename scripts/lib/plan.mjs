@@ -29,17 +29,36 @@ export function validateVersions(v) {
   const minors = Object.keys(v.php ?? {});
   if (minors.length === 0) fail('php が空');
   for (const minor of minors) {
-    const e = v.php[minor];
     if (!/^\d+\.\d+$/.test(minor)) fail(`php のキーが <major>.<minor> ではない: ${minor}`);
-    if (!/^[a-z]+$/.test(e.os ?? '')) fail(`php.${minor}.os が不正: ${e.os}`);
-    // 上流 docker-bake.hcl の php_base_variant に合わせる。
-    const [major, min] = minor.split('.').map(Number);
-    const variant = major * 100 + min >= 806 ? 'cli' : 'zts';
-    if (e.officialTag !== `${minor}-${variant}-${e.os}`) {
-      fail(`php.${minor}.officialTag は ${minor}-${variant}-${e.os} であるべき: ${e.officialTag}`);
-    }
-    if (!/^sha256:[0-9a-f]{64}$/.test(e.officialDigest ?? '')) fail(`php.${minor}.officialDigest が不正: ${e.officialDigest}`);
+    phpPin(v, minor);
   }
+}
+
+// 上流 docker-bake.hcl の php_base_variant に合わせる。
+function variantOf(minor) {
+  const [major, min] = minor.split('.').map(Number);
+  return major * 100 + min >= 806 ? 'cli' : 'zts';
+}
+
+// versions.json の php.<minor> から、ビルドする版と公式イメージのタグを読む。
+// officialDigest は、夜のジョブが版だけを上げて公式イメージがまだ無いあいだは null。
+export function phpPin(v, minor) {
+  const e = v.php?.[minor];
+  if (!e) fail(`php.${minor} が無い`);
+  if (!/^[a-z]+$/.test(e.os ?? '')) fail(`php.${minor}.os が不正: ${e.os}`);
+  const variant = variantOf(minor);
+  const m = new RegExp(`^${minor.replace('.', '\\.')}\\.(0|[1-9]\\d*)-${variant}-${e.os}$`).exec(e.officialTag ?? '');
+  if (!m) fail(`php.${minor}.officialTag は ${minor}.<patch>-${variant}-${e.os} であるべき: ${e.officialTag}`);
+  if (e.officialDigest !== null && !/^sha256:[0-9a-f]{64}$/.test(e.officialDigest ?? '')) {
+    fail(`php.${minor}.officialDigest が不正（sha256:… か null）: ${e.officialDigest}`);
+  }
+  return {
+    phpVersion: `${minor}.${m[1]}`,
+    os: e.os,
+    variant,
+    officialTag: e.officialTag,
+    movingTag: `${minor}-${variant}-${e.os}`,
+  };
 }
 
 const BUILD_INPUTS = [
@@ -57,10 +76,7 @@ const byVersion = (a, b) => a.localeCompare(b, 'en', { numeric: true });
 
 function matrix(after, minors) {
   const versions = [...minors].sort(byVersion);
-  const publishes = versions.map((version) => {
-    const { os, officialTag } = after.php[version];
-    return { version, os, officialTag };
-  });
+  const publishes = versions.map((version) => ({ version, ...phpPin(after, version) }));
   const builds = publishes.flatMap((p) => after.platforms.map(({ platform, runner }) => ({
     ...p, platform, runner, slug: `${p.version}-${platform.replace('/', '-')}`,
   })));
@@ -79,11 +95,10 @@ export function computePlan({ event, before = null, after, changedFiles = null, 
       php = all;
       frankenphp = all;
     } else {
+      // 版を指定した dispatch（夜のジョブ）はビルドしない。公開を待って versions.json を上げる PR を作るだけ。
       assertStableVersion(phpVersion);
       const minor = minorOf(phpVersion);
       if (!all.includes(minor)) throw new Error(`PHP ${minor} は versions.json に無い`);
-      php = [minor];
-      frankenphp = [minor];
       waitFor = phpVersion;
     }
   } else if (event === 'push') {

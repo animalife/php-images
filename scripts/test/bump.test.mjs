@@ -1,0 +1,39 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { bumpVersions, formatVersions, bumpBranch } from '../lib/bump.mjs';
+
+const repoVersions = () => JSON.parse(readFileSync(new URL('../../versions.json', import.meta.url), 'utf8'));
+
+test('パッチ版を上げ、digest は null にする（公式イメージがまだ無い）', () => {
+  const next = bumpVersions(repoVersions(), '8.6.1');
+  assert.equal(next.php['8.6'].officialTag, '8.6.1-cli-trixie');
+  assert.equal(next.php['8.6'].officialDigest, null);
+});
+
+test('main がすでにその版以上なら何もしない', () => {
+  const v = repoVersions();
+  const pinned = v.php['8.6'].officialTag.split('-')[0];
+  assert.equal(bumpVersions(v, pinned), null);
+  const [maj, min, patch] = pinned.split('.').map(Number);
+  if (patch > 0) assert.equal(bumpVersions(v, `${maj}.${min}.${patch - 1}`), null);
+});
+
+test('versions.json に無い minor・不正な版は例外', () => {
+  assert.throws(() => bumpVersions(repoVersions(), '8.7.0'), /8\.7/);
+  assert.throws(() => bumpVersions(repoVersions(), '8.6.01'), /版/);
+});
+
+// Renovate の custom manager は versions.json のこの書式を前提に置き換えるので、夜のジョブも同じ書式で書く。
+test('versions.json はリポジトリのファイルと同じ書式で書く（版だけの差分になる）', () => {
+  const original = readFileSync(new URL('../../versions.json', import.meta.url), 'utf8');
+  assert.equal(formatVersions(JSON.parse(original)), original);
+  const changed = formatVersions(bumpVersions(JSON.parse(original), '8.6.9')).split('\n')
+    .filter((line, i) => line !== original.split('\n')[i]);
+  assert.equal(changed.length, 2);
+});
+
+test('PR のブランチ名は版から決まる', () => {
+  assert.equal(bumpBranch('8.6.1'), 'php-version/8.6.1');
+  assert.throws(() => bumpBranch('8.6'), /版/);
+});
