@@ -24,6 +24,11 @@
     }
   },
   "php": {
+    "8.5": {
+      "os": "trixie",
+      "officialTag": "8.5.12-zts-trixie",
+      "officialDigest": "sha256:2ffa2b7471a9826f8a28f722ff21f83bc560367c0135372d88697f6c0666b5eb"
+    },
     "8.6": {
       "os": "trixie",
       "officialTag": "8.6.0-cli-trixie",
