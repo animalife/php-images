@@ -21,7 +21,7 @@
     // （Renovate が CI より新しい版で lockfile を書くと、CI の --verify が未知の lockfile version で落ちる）。
     constraints: {
         // renovate: datasource=github-releases depName=github/gh-actions-lock
-        ghActionsLock: 'v0.4.1',
+        ghActionsLock: 'v0.5.1',
     },
     customManagers: [
         {
