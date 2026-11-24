@@ -20,19 +20,19 @@
     },
     "frankenphp": {
       "docker/dockerfile:1": "sha256:572cebbc2b15e6f84c077742952674889cb63cd5e9b80abdffcbe587b6f19183",
-      "golang:1.27-trixie": "sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d"
+      "golang:1.27-trixie": "sha256:430985542100b871e108ccc00e8dcc5eef08ca14ee5825e98ebf563d8ffec4ee"
     }
   },
   "php": {
     "8.5": {
       "os": "trixie",
       "officialTag": "8.5.13-zts-trixie",
-      "officialDigest": "sha256:701a661fd351d73a3639230e313194124febb3e58c19ac1f843a74bcd82b06cc"
+      "officialDigest": "sha256:bef796b25cad30730f213b80a08e58f45dade34691f0dd26472e29a94450990d"
     },
     "8.6": {
       "os": "trixie",
       "officialTag": "8.6.0-cli-trixie",
-      "officialDigest": "sha256:2d36f17bcfc0115d0c27ae9b6f4d400f480e422b185ad060e136b1a58d611964"
+      "officialDigest": "sha256:64340b5b5eb25273bdd0986124c8efb08dadfbd4fda6929c8a44618a318c7b17"
     }
   }
 }
