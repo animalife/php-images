@@ -27,7 +27,7 @@
     "8.5": {
       "os": "trixie",
       "officialTag": "8.5.13-zts-trixie",
-      "officialDigest": "sha256:2138671931fb81a36e72c594dad6460d3245dbc66af476b7f7511db138e820eb"
+      "officialDigest": "sha256:701a661fd351d73a3639230e313194124febb3e58c19ac1f843a74bcd82b06cc"
     },
     "8.6": {
       "os": "trixie",
