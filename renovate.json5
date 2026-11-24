@@ -212,6 +212,19 @@
             automerge: true,
         },
         {
+            description: 'versions.json の docker イメージの digest の更新（親イメージと php の公式イメージ）は 1 つの PR にまとめる。Debian の作り直しは debian:trixie-slim・php の公式イメージ・golang の digest に連鎖して届き、別々の PR だとマージのたびに build.yml が全版を作り直して公開するため。patch（minor ごとのブランチ）と pinDigest（夜のジョブの版上げの後追い）は含めない',
+            matchFileNames: [
+                'versions.json',
+            ],
+            matchDatasources: [
+                'docker',
+            ],
+            matchUpdateTypes: [
+                'digest',
+            ],
+            groupName: 'versions.json digests',
+        },
+        {
             description: 'FrankenPHP は即時に PR を作る。パッチには Caddy や Go のセキュリティ修正が入るので patch は自動マージ（PR の CI の smoke build が FrankenPHP を組む）、minor 以上は挙動の変化を含みうるので手動',
             matchDatasources: [
                 'github-tags',
