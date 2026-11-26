@@ -236,9 +236,10 @@ AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua exec -- zizmor --persona pedantic .
 - Renovate は、PR の CI で実行されない action（login・upload/download-artifact・attest・create-github-app-token）を手動マージにしている
   （公開権限や App の鍵を持つ main の run で初めて動くため）
 - aqua のツールの版を変えたら、その設定ごとに `AQUA_CONFIG=<設定> aqua update-checksum --prune` で checksum を作り直す。
+  Renovate の PR では `.github/workflows/update-aqua-checksum.yml` が作り直して、version-bump の App で同じ PR に積む。
   `.github/aqua.yaml` はビルドの入力（変えると全版を作り直す）、`.github/aqua-ci/aqua.yaml` は CI だけで使う
-- PR とマージキューでは `.github/workflows/ci.yml` が lint・テスト・親イメージの pin の検査・php と FrankenPHP の amd64 のビルド
-  （push しない。FrankenPHP は同じジョブの php の OCI layout を php-base に使う）・
+- PR とマージキューでは `.github/workflows/ci.yml` が lint・aqua の checksum の鮮度の検査・テスト・親イメージの pin の検査・
+  php と FrankenPHP の amd64 のビルド（push しない。FrankenPHP は同じジョブの php の OCI layout を php-base に使う）・
   Renovate 設定の検証・actions.lock の検証を行い、`CI Gate` に集約する
 
 ### GHCR の untagged

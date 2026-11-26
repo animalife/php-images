@@ -8,9 +8,9 @@ name: update-aqua-checksum
 # このファイルを書き換えて App の秘密鍵を抜ける。pull_request_target は定義を既定ブランチから読み、
 # GITHUB_REF も既定ブランチになるので、main 限定の version-bump environment をそのまま使える。
 on:
-  # PR の head のコードは実行しない。head から読むのは aqua の設定（データ）だけで、実行するスクリプトと
-  # Node の版は既定ブランチの checkout から取る。job は同じリポジトリの Renovate の PR に限る。
-  pull_request_target: # zizmor: ignore[dangerous-triggers] head のコードを実行しない（理由は直上）
+  # head の aqua の設定を処理する generate は、secret も書き込み権限も持たない。鍵を持つ commit は
+  # head のコードも設定も扱わず、generate が作った 2 つの JSON を検査してから API で積むだけにしている。
+  pull_request_target: # zizmor: ignore[dangerous-triggers] head を処理する job には鍵が無い（理由は直上）
     types: [opened, synchronize, reopened]
     branches: [main]
     paths:
@@ -26,15 +26,60 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  update-checksum:
-    name: Update aqua checksums
-    # App の鍵を持つ job なので、同じリポジトリの Renovate の PR に限る。PR の作成者しか見ないので、
-    # 枝に積まれた中身は保証しない。head のコードを鍵のある環境で実行しないことは各 step で守る。
-    if: >-
-      ${{
-        github.event.pull_request.user.login == 'renovate[bot]' &&
-        github.event.pull_request.head.repo.full_name == github.repository
-      }}
+  # aqua update-checksum は head の aqua.yaml が決める registry をもとに、cosign などの検証ツールを起動しうる。
+  # 同じ runner の上では step の順は境界にならないので、鍵を持つ job とは runner を分ける。
+  generate:
+    name: Generate aqua checksums
+    if: ${{ github.event.pull_request.user.login == 'renovate[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
+        with:
+          aqua_version: v2.66.1
+          # パッケージは使わない（update-checksum だけ）。
+          enable_aqua_install: false
+
+      # -a はグローバル設定のパッケージまで書き込むので付けない（各 aqua.yaml の冒頭の手順と同じ）。
+      # 版を変えていない側は差分が出ないだけなので、両方とも作り直す。
+      - name: Update checksums
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune
+          AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua update-checksum --prune
+
+      - name: Stage checksums
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/aqua-checksums"
+          mkdir -p "${out}/aqua-ci"
+          for f in aqua-checksums.json aqua-ci/aqua-checksums.json; do
+            if [ -L ".github/${f}" ] || [ ! -f ".github/${f}" ]; then
+              echo "::error::.github/${f} が通常のファイルではない"
+              exit 1
+            fi
+            cp ".github/${f}" "${out}/${f}"
+          done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aqua-checksums
+          path: ${{ runner.temp }}/aqua-checksums/
+          if-no-files-found: error
+          retention-days: 1
+
+  commit:
+    name: Commit aqua checksums
+    needs: generate
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     # 秘密鍵は environment の secret に置き、デプロイブランチを main に限る。
@@ -52,52 +97,21 @@ jobs:
             exit 1
           fi
 
-      # 鍵を渡す step で実行するものは、この workflow の定義と同じ既定ブランチの commit（GITHUB_SHA）から取る。
-      # head の中に置くと、head が同じ名前のディレクトリや symlink を持ち込めるので、head とは兄弟のディレクトリにする。
-      # package.json は、Node が .mjs の親をたどって読む package.json をこの checkout の中で止めるために置く。
-      - name: Checkout the trusted commit script
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # head は checkout しない。差分は head の SHA の tree と API で比べる。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          sparse-checkout: |
-            .node-version
-            package.json
-            scripts/signed-commit.mjs
-            scripts/lib/
-          sparse-checkout-cone-mode: false
-          path: trusted
-          persist-credentials: false
-
-      # head_ref ではなく event の SHA を取る。作り直す内容とコミットの expectedHeadOid が同じ commit に揃い、
-      # その後に枝が進んでいれば API が拒む（新しい push の run が作り直す）。
-      - name: Checkout the PR head
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          path: head
           persist-credentials: false
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version-file: trusted/.node-version
+          node-version-file: .node-version
           package-manager-cache: false
 
-      - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          aqua_version: v2.66.1
-          # 既定（true）だと aqua i -l が aqua の設定からパッケージを入れて shim を PATH の先頭に作る。head の設定を
-          # 読めば後の step の node や git を head 側が差し替えられる。ここで使うのは aqua update-checksum だけなので入れない。
-          enable_aqua_install: false
+          name: aqua-checksums
+          path: ${{ runner.temp }}/aqua-checksums
 
-      # -a はグローバル設定のパッケージまで書き込むので付けない（各 aqua.yaml の冒頭の手順と同じ）。
-      # 版を変えていない側は差分が出ないだけなので、両方とも作り直す。
-      - name: Update checksums
-        working-directory: head
-        run: |
-          set -euo pipefail
-          AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune
-          AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua update-checksum --prune
-
-      # 鍵は aqua を動かした後、コミットの直前にだけ使う。
       - name: Get GitHub App token
         id: app-token
         uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
@@ -107,10 +121,9 @@ jobs:
           permission-contents: write
 
       - name: Commit checksums if changed
-        working-directory: head
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           TARGET_BRANCH: ${{ github.head_ref }}
-          COMMIT_MESSAGE: 'chore(deps): aqua-checksums.json を作り直す'
-          COMMIT_PATHS: .github/aqua-checksums.json .github/aqua-ci/aqua-checksums.json
-        run: node ../trusted/scripts/signed-commit.mjs
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ARTIFACT_DIR: ${{ runner.temp }}/aqua-checksums
+        run: node scripts/commit-aqua-checksums.mjs

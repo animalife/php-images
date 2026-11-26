@@ -46,6 +46,36 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --persona pedantic --format github .
 
+  # .github/aqua.yaml のツールは build.yml でしか入らないので、checksum の古さは PR のうちにここで止める。
+  check-aqua-checksums:
+    name: check aqua checksums
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
+        with:
+          aqua_version: v2.66.1
+          # パッケージは使わない（update-checksum だけ）。
+          enable_aqua_install: false
+
+      - name: Verify aqua-checksums.json is up to date
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune
+          AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua update-checksum --prune
+          if ! git diff --exit-code -- .github/aqua-checksums.json .github/aqua-ci/aqua-checksums.json; then
+            echo "::error::aqua-checksums.json が aqua.yaml に追従していない。AQUA_CONFIG=<設定> aqua update-checksum --prune で作り直す"
+            exit 1
+          fi
+
   test-scripts:
     name: test scripts
     runs-on: ubuntu-24.04
@@ -270,7 +300,7 @@ jobs:
 
   gate:
     name: CI Gate
-    needs: [lint-workflows, test-scripts, check-base-images, renovate-config, verify-actions-lock]
+    needs: [lint-workflows, check-aqua-checksums, test-scripts, check-base-images, renovate-config, verify-actions-lock]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
