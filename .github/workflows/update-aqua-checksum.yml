@@ -1,0 +1,96 @@
+name: update-aqua-checksum
+
+# Renovate が aqua の設定（.github/aqua.yaml と .github/aqua-ci/aqua.yaml）の版を上げた PR に、
+# aqua-checksums.json を作り直した署名済みのコミットを積む。どちらも require_checksum なので、
+# checksum を作り直さないと CI と build.yml で aqua が入らない。
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/aqua.yaml
+      - .github/aqua-ci/aqua.yaml
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  update-checksum:
+    name: Update aqua checksums
+    # App の鍵を持つ job なので、Renovate の PR に限る。PR の作成者しか見ないので、枝に積まれた中身は保証しない。
+    # head のコードを鍵のある環境で実行しないことは各 step で守る（コミットするスクリプトは base の信頼版を使い、
+    # aqua-installer では head の aqua.yaml からパッケージを入れない）。
+    if: ${{ github.event.pull_request.user.login == 'renovate[bot]' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # 秘密鍵は environment の secret に置く（main 限定の version-bump は PR の run から使えない）。
+    environment: aqua-checksum
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      # 変数が空だと create-github-app-token の失敗の理由が分かりにくいので、先に止める。
+      - name: Check the App client ID
+        env:
+          CLIENT_ID: ${{ vars.VERSION_BUMP_APP_CLIENT_ID }}
+        run: |
+          if [ -z "${CLIENT_ID}" ]; then
+            echo "::error::repository variable VERSION_BUMP_APP_CLIENT_ID が空"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+
+      # head が scripts/ を書き換えていても、鍵を渡す step では base の版だけを実行する。
+      - name: Checkout the trusted commit script from base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          sparse-checkout: |
+            .node-version
+            scripts/signed-commit.mjs
+            scripts/lib/
+          sparse-checkout-cone-mode: false
+          path: .base-trusted
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .base-trusted/.node-version
+          package-manager-cache: false
+
+      - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
+        with:
+          aqua_version: v2.66.1
+          # 既定（true）だと aqua i -l が head の作業ツリーの aqua 設定を探して shim を PATH の先頭に作り、
+          # 後の step の node や git を head 側が差し替えられる。ここで使うのは aqua update-checksum だけなので入れない。
+          enable_aqua_install: false
+
+      # -a はグローバル設定のパッケージまで書き込むので付けない（各 aqua.yaml の冒頭の手順と同じ）。
+      # 版を変えていない側は差分が出ないだけなので、両方とも作り直す。
+      - name: Update checksums
+        run: |
+          set -euo pipefail
+          AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune
+          AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua update-checksum --prune
+
+      # 鍵は aqua を動かした後、コミットの直前にだけ使う。
+      - name: Get GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.VERSION_BUMP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.VERSION_BUMP_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Commit checksums if changed
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_BRANCH: ${{ github.head_ref }}
+          COMMIT_MESSAGE: 'chore(deps): aqua-checksums.json を作り直す'
+          COMMIT_PATHS: .github/aqua-checksums.json .github/aqua-ci/aqua-checksums.json
+        run: node .base-trusted/scripts/signed-commit.mjs
