@@ -246,3 +246,8 @@ AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua exec -- zizmor --persona pedantic .
 再ビルドのたびに、タグの外れた index とアーキごとの manifest が残る。untagged を単純に消すと、タグ付きの index が
 参照している子の manifest（アーキごとの manifest や attestation）まで消えてイメージが壊れる。掃除するなら、
 index からの参照を検証してから消す仕組みを使う
+
+## ライセンス
+
+このリポジトリのスクリプト・ワークフロー・設定は [MIT License](LICENSE)。公開するイメージに含まれるソフトウェア
+（PHP、Debian のパッケージ、FrankenPHP、Caddy など）は、それぞれの上流のライセンスに従う
