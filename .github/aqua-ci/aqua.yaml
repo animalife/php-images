@@ -13,4 +13,4 @@ registries:
     ref: v4.591.0 # renovate: depName=aquaproj/aqua-registry
 packages:
   - name: jdx/jactionlint@v2.6.0
-  - name: zizmorcore/zizmor@v1.32.0
+  - name: zizmorcore/zizmor@v1.33.1
