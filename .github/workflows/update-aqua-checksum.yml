@@ -1,12 +1,11 @@
 name: update-aqua-checksum
 
 # Renovate が aqua の設定（.github/aqua.yaml と .github/aqua-ci/aqua.yaml）の版を上げた PR に、
-# aqua-checksums.json を作り直した署名済みのコミットを積む。どちらも require_checksum なので、
-# checksum を作り直さないと CI と build.yml で aqua が入らない。
+# aqua-checksums.json を作り直した署名済みのコミットを積む。
 #
-# pull_request は使わない。workflow の定義を PR の merge ref から読むので、write 権限があれば PR で
-# このファイルを書き換えて App の秘密鍵を抜ける。pull_request_target は定義を既定ブランチから読み、
-# GITHUB_REF も既定ブランチになるので、main 限定の version-bump environment をそのまま使える。
+# pull_request は使わない。その run の ref は refs/pull/N/merge で main ではないので、main 限定の
+# version-bump environment に入れない。入れるように緩めると、PR で書き換えた workflow の定義から
+# App の秘密鍵を抜ける。pull_request_target は定義も ref も既定ブランチ（main）になる。
 on:
   # head の aqua の設定を処理する generate は、secret も書き込み権限も持たない。鍵を持つ commit は
   # head のコードも設定も扱わず、generate が作った 2 つの JSON を検査してから API で積むだけにしている。
@@ -47,13 +46,15 @@ jobs:
           # パッケージは使わない（update-checksum だけ）。
           enable_aqua_install: false
 
+      # update-checksum は既存のエントリの値を取り直さないので、ファイルを消してから全エントリを作り直す
+      # （2026-11-26、aqua v2.66.1。既存の checksum を 1 文字変えて update-checksum --prune しても元に戻らない）。
       # -a はグローバル設定のパッケージまで書き込むので付けない（各 aqua.yaml の冒頭の手順と同じ）。
-      # 版を変えていない側は差分が出ないだけなので、両方とも作り直す。
-      - name: Update checksums
+      - name: Regenerate checksums
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          rm -f .github/aqua-checksums.json .github/aqua-ci/aqua-checksums.json
           AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune
           AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua update-checksum --prune
 
@@ -80,9 +81,9 @@ jobs:
   commit:
     name: Commit aqua checksums
     needs: generate
+    if: ${{ github.event.pull_request.user.login == 'renovate[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    # 秘密鍵は environment の secret に置き、デプロイブランチを main に限る。
     environment: version-bump
     permissions:
       contents: read # checkout に必要

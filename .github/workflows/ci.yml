@@ -46,7 +46,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --persona pedantic --format github .
 
-  # .github/aqua.yaml のツールは build.yml でしか入らないので、checksum の古さは PR のうちにここで止める。
   check-aqua-checksums:
     name: check aqua checksums
     runs-on: ubuntu-24.04
@@ -64,15 +63,23 @@ jobs:
           # パッケージは使わない（update-checksum だけ）。
           enable_aqua_install: false
 
-      - name: Verify aqua-checksums.json is up to date
+      # update-checksum は既存のエントリの値を取り直さないので、ファイルを消してから全エントリを作り直して比べる
+      # （update-aqua-checksum.yml の Regenerate checksums と同じ手順）。消したファイルが作られない場合も
+      # 差分として拾うよう、git diff ではなく git status で見る。
+      - name: Verify aqua-checksums.json matches a full regeneration
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          files=(.github/aqua-checksums.json .github/aqua-ci/aqua-checksums.json)
+          rm -f "${files[@]}"
           AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune
           AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua update-checksum --prune
-          if ! git diff --exit-code -- .github/aqua-checksums.json .github/aqua-ci/aqua-checksums.json; then
-            echo "::error::aqua-checksums.json が aqua.yaml に追従していない。AQUA_CONFIG=<設定> aqua update-checksum --prune で作り直す"
+          changes="$(git status --porcelain -- "${files[@]}")"
+          if [ -n "${changes}" ]; then
+            git status --short -- "${files[@]}"
+            git diff -- "${files[@]}"
+            echo "::error::aqua-checksums.json が作り直した結果と一致しない。ファイルを消してから AQUA_CONFIG=<設定> aqua update-checksum --prune で作り直す"
             exit 1
           fi
 

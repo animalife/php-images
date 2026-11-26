@@ -1,4 +1,4 @@
-import { lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   buildCommitInput,
@@ -7,21 +7,12 @@ import {
   HEAD_TREES_QUERY,
   headEntriesFromTrees,
   headTreesVariables,
+  listArtifactEntries,
   parseChecksumsFile,
   planAdditions,
 } from './lib/aqua-checksums.mjs';
 import { client } from './lib/github.mjs';
 import { appendSummary, env, main } from './lib/gha.mjs';
-
-function listEntries(root, prefix = '') {
-  return readdirSync(join(root, prefix), { withFileTypes: true }).flatMap((dirent) => {
-    const path = prefix === '' ? dirent.name : `${prefix}/${dirent.name}`;
-    const stat = lstatSync(join(root, path));
-    const kind = stat.isSymbolicLink() ? 'symlink' : stat.isFile() ? 'file' : stat.isDirectory() ? 'directory' : 'other';
-    const entry = { path, kind, size: stat.size };
-    return kind === 'directory' ? [entry, ...listEntries(root, path)] : [entry];
-  });
-}
 
 main(async () => {
   const repo = env('GITHUB_REPOSITORY');
@@ -30,7 +21,7 @@ main(async () => {
   const artifactDir = env('ARTIFACT_DIR');
   const { graphql } = client(env('GH_TOKEN'));
 
-  checkArtifactEntries(listEntries(artifactDir));
+  checkArtifactEntries(listArtifactEntries(artifactDir));
   const files = CHECKSUM_FILES.map(({ artifactPath, repoPath }) => {
     const content = readFileSync(join(artifactDir, artifactPath));
     parseChecksumsFile(content);

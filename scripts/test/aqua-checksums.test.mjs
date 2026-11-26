@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -11,6 +11,7 @@ import {
   gitBlobSha,
   headEntriesFromTrees,
   headTreesVariables,
+  listArtifactEntries,
   MAX_CHECKSUM_FILE_BYTES,
   parseChecksumsFile,
   planAdditions,
@@ -169,4 +170,31 @@ test('tree を引く式は head の SHA に固定する', () => {
   assert.deepEqual(headTreesVariables({ owner: 'o', name: 'r', headSha: OID }), {
     owner: 'o', name: 'r', github: `${OID}:.github`, aquaCi: `${OID}:.github/aqua-ci`,
   });
+});
+
+// 捕まえる変異: lstat を stat に変え、symlink を辿って通常のファイルやディレクトリとして扱う。
+test('artifact のディレクトリを symlink を辿らずに列挙する', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'aqua-checksums-list-'));
+  try {
+    const root = join(dir, 'artifact');
+    mkdirSync(join(root, 'aqua-ci'), { recursive: true });
+    writeFileSync(join(root, 'aqua-checksums.json'), 'abc');
+    writeFileSync(join(root, 'aqua-ci', 'aqua-checksums.json'), 'de');
+    mkdirSync(join(dir, 'outside'));
+    writeFileSync(join(dir, 'outside', 'secret.json'), 'x');
+    symlinkSync(join(dir, 'outside', 'secret.json'), join(root, 'link.json'));
+    symlinkSync(join(dir, 'outside'), join(root, 'linkdir'));
+    const entries = listArtifactEntries(root).sort((a, b) => a.path.localeCompare(b.path));
+    assert.deepEqual(entries.map(({ path, kind }) => ({ path, kind })), [
+      { path: 'aqua-checksums.json', kind: 'file' },
+      { path: 'aqua-ci', kind: 'directory' },
+      { path: 'aqua-ci/aqua-checksums.json', kind: 'file' },
+      { path: 'link.json', kind: 'symlink' },
+      { path: 'linkdir', kind: 'symlink' },
+    ]);
+    assert.equal(entries.find((e) => e.path === 'aqua-checksums.json').size, 3);
+    assert.throws(() => checkArtifactEntries(entries), /symlink/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

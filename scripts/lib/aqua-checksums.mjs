@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { lstatSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 export const CHECKSUM_FILES = [
   { artifactPath: 'aqua-checksums.json', repoPath: '.github/aqua-checksums.json' },
@@ -8,6 +10,16 @@ export const CHECKSUM_FILES = [
 export const MAX_CHECKSUM_FILE_BYTES = 1024 * 1024;
 
 const ARTIFACT_DIRECTORIES = new Set(['aqua-ci']);
+
+export function listArtifactEntries(root, prefix = '') {
+  return readdirSync(join(root, prefix), { withFileTypes: true }).flatMap((dirent) => {
+    const path = prefix === '' ? dirent.name : `${prefix}/${dirent.name}`;
+    const stat = lstatSync(join(root, path));
+    const kind = stat.isSymbolicLink() ? 'symlink' : stat.isFile() ? 'file' : stat.isDirectory() ? 'directory' : 'other';
+    const entry = { path, kind, size: stat.size };
+    return kind === 'directory' ? [entry, ...listArtifactEntries(root, path)] : [entry];
+  });
+}
 
 export function checkArtifactEntries(entries) {
   const expected = new Set(CHECKSUM_FILES.map((f) => f.artifactPath));
