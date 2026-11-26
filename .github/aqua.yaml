@@ -1,8 +1,7 @@
 # aqua - Declarative CLI Version Manager
 # https://aquaproj.github.io/
 # build.yml が使うツール（ビルドの入力）。CI でしか使わないものは .github/aqua-ci/aqua.yaml に置く。
-# 版を変えたら `AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune` で aqua-checksums.json を作り直す
-# （-a はグローバル設定のパッケージまで書き込むので付けない）
+# 版を変えたら `node scripts/regenerate-aqua-checksums.mjs` で aqua-checksums.json を消して作り直す
 # （require_checksum のため、checksum が無い版は CI で入らない）。
 checksum:
   enabled: true

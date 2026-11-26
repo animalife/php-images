@@ -1,0 +1,134 @@
+name: update-aqua-checksum
+
+# Renovate が aqua の設定（.github/aqua.yaml と .github/aqua-ci/aqua.yaml）の版を上げた PR に、
+# aqua-checksums.json を作り直した署名済みのコミットを積む。
+#
+# pull_request は使わない。その run の ref は refs/pull/N/merge で main ではないので、main 限定の
+# version-bump environment に入れない。入れるように緩めると、PR で書き換えた workflow の定義から
+# App の秘密鍵を抜ける。pull_request_target は定義も ref も既定ブランチ（main）になる。
+on:
+  # head の aqua の設定を処理する generate は、secret も書き込み権限も持たない。鍵を持つ commit は
+  # head のコードも設定も扱わず、generate が作った 2 つの JSON を検査してから API で積むだけにしている。
+  pull_request_target: # zizmor: ignore[dangerous-triggers] head を処理する job には鍵が無い（理由は直上）
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - .github/aqua.yaml
+      - .github/aqua-ci/aqua.yaml
+
+permissions: {}
+
+concurrency:
+  # head_ref は fork の PR と同じ名前になりうる。workflow の concurrency は job の if より先に効くので、
+  # fork の PR が Renovate の run を取り消さないよう PR の番号で分ける。
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # aqua update-checksum は head の aqua.yaml が決める registry をもとに、cosign などの検証ツールを起動しうる。
+  # 同じ runner の上では step の順は境界にならないので、鍵を持つ job とは runner を分ける。
+  generate:
+    name: Generate aqua checksums
+    if: ${{ github.event.pull_request.user.login == 'renovate[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      # 作り直すスクリプトは head ではなく、この workflow の定義と同じ既定ブランチの commit（GITHUB_SHA）から取る。
+      # head の中に置くと head が同じ名前のディレクトリや symlink を持ち込めるので、head とは兄弟のディレクトリにする。
+      # package.json は、Node が .mjs の親をたどって読む package.json をこの checkout の中で止めるために置く。
+      - name: Checkout the trusted scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .node-version
+            package.json
+            scripts/regenerate-aqua-checksums.mjs
+            scripts/lib/
+          sparse-checkout-cone-mode: false
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout the PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: head
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: trusted/.node-version
+          package-manager-cache: false
+
+      - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
+        with:
+          aqua_version: v2.66.1
+          # パッケージは使わない（update-checksum だけ）。
+          enable_aqua_install: false
+
+      - name: Regenerate checksums
+        working-directory: head
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OUT_DIR: ${{ runner.temp }}/aqua-checksums
+        run: node ../trusted/scripts/regenerate-aqua-checksums.mjs
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: aqua-checksums
+          path: ${{ runner.temp }}/aqua-checksums/
+          if-no-files-found: error
+          retention-days: 1
+
+  commit:
+    name: Commit aqua checksums
+    needs: generate
+    if: ${{ github.event.pull_request.user.login == 'renovate[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: version-bump
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      # 変数が空だと create-github-app-token の失敗の理由が分かりにくいので、先に止める。
+      - name: Check the App client ID
+        env:
+          CLIENT_ID: ${{ vars.VERSION_BUMP_APP_CLIENT_ID }}
+        run: |
+          if [ -z "${CLIENT_ID}" ]; then
+            echo "::error::repository variable VERSION_BUMP_APP_CLIENT_ID が空"
+            exit 1
+          fi
+
+      # head は checkout しない。差分は head の SHA の tree と API で比べる。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: aqua-checksums
+          path: ${{ runner.temp }}/aqua-checksums
+
+      - name: Get GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.VERSION_BUMP_APP_CLIENT_ID }}
+          private-key: ${{ secrets.VERSION_BUMP_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Commit checksums if changed
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TARGET_BRANCH: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ARTIFACT_DIR: ${{ runner.temp }}/aqua-checksums
+        run: node scripts/commit-aqua-checksums.mjs

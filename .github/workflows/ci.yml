@@ -46,6 +46,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: zizmor --persona pedantic --format github .
 
+  check-aqua-checksums:
+    name: check aqua checksums
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # checkout に必要
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
+      - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
+        with:
+          aqua_version: v2.66.1
+          # パッケージは使わない（update-checksum だけ）。
+          enable_aqua_install: false
+
+      # 作り直しと比較の手順は scripts/lib/aqua-checksums.mjs の regenerateChecksums / dirtyChecksums。
+      - name: Verify aqua-checksums.json matches a full regeneration
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CHECK: '1'
+        run: node scripts/regenerate-aqua-checksums.mjs
+
   test-scripts:
     name: test scripts
     runs-on: ubuntu-24.04
@@ -270,7 +299,7 @@ jobs:
 
   gate:
     name: CI Gate
-    needs: [lint-workflows, test-scripts, check-base-images, renovate-config, verify-actions-lock]
+    needs: [lint-workflows, check-aqua-checksums, test-scripts, check-base-images, renovate-config, verify-actions-lock]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
