@@ -35,10 +35,32 @@ jobs:
     permissions:
       contents: read # checkout に必要
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # 作り直すスクリプトは head ではなく、この workflow の定義と同じ既定ブランチの commit（GITHUB_SHA）から取る。
+      # head の中に置くと head が同じ名前のディレクトリや symlink を持ち込めるので、head とは兄弟のディレクトリにする。
+      # package.json は、Node が .mjs の親をたどって読む package.json をこの checkout の中で止めるために置く。
+      - name: Checkout the trusted scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            .node-version
+            package.json
+            scripts/regenerate-aqua-checksums.mjs
+            scripts/lib/
+          sparse-checkout-cone-mode: false
+          path: trusted
+          persist-credentials: false
+
+      - name: Checkout the PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          path: head
           persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: trusted/.node-version
+          package-manager-cache: false
 
       - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
         with:
@@ -46,30 +68,12 @@ jobs:
           # パッケージは使わない（update-checksum だけ）。
           enable_aqua_install: false
 
-      # update-checksum は既存のエントリの値を取り直さないので、ファイルを消してから全エントリを作り直す
-      # （2026-11-26、aqua v2.66.1。既存の checksum を 1 文字変えて update-checksum --prune しても元に戻らない）。
-      # -a はグローバル設定のパッケージまで書き込むので付けない（各 aqua.yaml の冒頭の手順と同じ）。
       - name: Regenerate checksums
+        working-directory: head
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          rm -f .github/aqua-checksums.json .github/aqua-ci/aqua-checksums.json
-          AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune
-          AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua update-checksum --prune
-
-      - name: Stage checksums
-        run: |
-          set -euo pipefail
-          out="${RUNNER_TEMP}/aqua-checksums"
-          mkdir -p "${out}/aqua-ci"
-          for f in aqua-checksums.json aqua-ci/aqua-checksums.json; do
-            if [ -L ".github/${f}" ] || [ ! -f ".github/${f}" ]; then
-              echo "::error::.github/${f} が通常のファイルではない"
-              exit 1
-            fi
-            cp ".github/${f}" "${out}/${f}"
-          done
+          OUT_DIR: ${{ runner.temp }}/aqua-checksums
+        run: node ../trusted/scripts/regenerate-aqua-checksums.mjs
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

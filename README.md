@@ -194,6 +194,8 @@ packages: write を持つジョブ（php-build・php-publish・frankenphp-push�
   権限が要る statusCheckRollup は、GITHUB_TOKEN で見届ける watch-bump だけが読む）
 - repository variable `VERSION_BUMP_APP_CLIENT_ID`: App の Client ID（空ならトークンを作る前に止まる）
 - environment `version-bump` の secret `VERSION_BUMP_APP_PRIVATE_KEY`: App の秘密鍵
+- 同じ App と environment を、update-aqua-checksum の commit ジョブも使う（Renovate の aqua の PR に、createCommitOnBranch で
+  aqua-checksums.json のコミットを積むので Contents: write を使う）
 - リポジトリの「Allow auto-merge」と、main の ruleset のマージキュー（PR の auto-merge がキューに入るため）
 - App の権限で、auto-merge の有効化とマージキューへの投入ができるか（Contents / Pull requests の write で足りるか、
   `merge_queues` の権限も要るか）は、初回の夜のジョブで確かめる
@@ -235,7 +237,8 @@ AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua exec -- zizmor --persona pedantic .
   SHA の固定は、Actions の設定 `sha_pinning_required` と CI の actions.lock の verify で守られる
 - Renovate は、PR の CI で実行されない action（login・upload/download-artifact・attest・create-github-app-token）を手動マージにしている
   （公開権限や App の鍵を持つ main の run で初めて動くため）
-- aqua のツールの版を変えたら、その設定ごとに `AQUA_CONFIG=<設定> aqua update-checksum --prune` で checksum を作り直す。
+- aqua のツールの版を変えたら、`node scripts/regenerate-aqua-checksums.mjs` で両方の aqua-checksums.json を消して作り直す
+  （`aqua update-checksum` は既存のエントリの値を取り直さないため）。
   Renovate の PR では `.github/workflows/update-aqua-checksum.yml` が作り直して、version-bump の App で同じ PR に積む。
   `.github/aqua.yaml` はビルドの入力（変えると全版を作り直す）、`.github/aqua-ci/aqua.yaml` は CI だけで使う
 - PR とマージキューでは `.github/workflows/ci.yml` が lint・aqua の checksum が作り直した結果と一致するかの検査・テスト・親イメージの pin の検査・

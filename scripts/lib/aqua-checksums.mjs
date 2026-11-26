@@ -1,11 +1,35 @@
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstatSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 export const CHECKSUM_FILES = [
-  { artifactPath: 'aqua-checksums.json', repoPath: '.github/aqua-checksums.json' },
-  { artifactPath: 'aqua-ci/aqua-checksums.json', repoPath: '.github/aqua-ci/aqua-checksums.json' },
+  { config: '.github/aqua.yaml', artifactPath: 'aqua-checksums.json', repoPath: '.github/aqua-checksums.json' },
+  { config: '.github/aqua-ci/aqua.yaml', artifactPath: 'aqua-ci/aqua-checksums.json', repoPath: '.github/aqua-ci/aqua-checksums.json' },
 ];
+
+// update-checksum は既存のエントリの値を取り直さないので、ファイルを消してから全エントリを作り直す
+// （2026-11-26、aqua v2.66.1。既存の checksum を 1 文字変えて update-checksum --prune しても元に戻らない）。
+// -a はグローバル設定のパッケージまで書き込むので付けない。
+export function regenerateChecksums({ cwd, exec = execFileSync }) {
+  for (const { repoPath } of CHECKSUM_FILES) rmSync(join(cwd, repoPath), { force: true });
+  for (const { config } of CHECKSUM_FILES) {
+    exec('aqua', ['update-checksum', '--prune'], { cwd, env: { ...process.env, AQUA_CONFIG: config }, stdio: 'inherit' });
+  }
+}
+
+export function stageChecksums({ cwd, outDir }) {
+  for (const { repoPath, artifactPath } of CHECKSUM_FILES) {
+    if (!lstatSync(join(cwd, repoPath)).isFile()) throw new Error(`${repoPath} が通常のファイルではない`);
+    mkdirSync(dirname(join(outDir, artifactPath)), { recursive: true });
+    copyFileSync(join(cwd, repoPath), join(outDir, artifactPath));
+  }
+}
+
+// git diff --exit-code は使わない。index から消えて untracked で作り直されたファイルを差分として拾わない。
+export function dirtyChecksums({ cwd }) {
+  return execFileSync('git', ['status', '--porcelain', '--', ...CHECKSUM_FILES.map((f) => f.repoPath)], { cwd, encoding: 'utf8' });
+}
 
 export const MAX_CHECKSUM_FILE_BYTES = 1024 * 1024;
 
@@ -112,4 +136,24 @@ export function buildCommitInput({ repo, branch, headline, expectedHeadOid, addi
     expectedHeadOid,
     fileChanges: { additions },
   };
+}
+
+export async function commitChecksums({ artifactDir, repo, branch, headSha, graphql }) {
+  checkArtifactEntries(listArtifactEntries(artifactDir));
+  const files = CHECKSUM_FILES.map(({ artifactPath, repoPath }) => {
+    const content = readFileSync(join(artifactDir, artifactPath));
+    parseChecksumsFile(content);
+    return { repoPath, content };
+  });
+
+  const [owner, name] = repo.split('/');
+  const trees = await graphql(HEAD_TREES_QUERY, headTreesVariables({ owner, name, headSha }));
+  const additions = planAdditions(files, headEntriesFromTrees(trees.repository));
+  if (additions.length === 0) return { committed: false };
+
+  const data = await graphql(
+    `mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }`,
+    { input: buildCommitInput({ repo, branch, headline: 'chore(deps): aqua-checksums.json を作り直す', expectedHeadOid: headSha, additions }) },
+  );
+  return { committed: true, url: data.createCommitOnBranch.commit.url, paths: additions.map((a) => a.path) };
 }

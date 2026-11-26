@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildCommitInput,
   checkArtifactEntries,
   CHECKSUM_FILES,
+  commitChecksums,
+  dirtyChecksums,
   gitBlobSha,
   headEntriesFromTrees,
   headTreesVariables,
@@ -15,6 +17,8 @@ import {
   MAX_CHECKSUM_FILE_BYTES,
   parseChecksumsFile,
   planAdditions,
+  regenerateChecksums,
+  stageChecksums,
 } from '../lib/aqua-checksums.mjs';
 
 const VALID = Buffer.from(`${JSON.stringify({
@@ -197,4 +201,140 @@ test('artifact のディレクトリを symlink を辿らずに列挙する', ()
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+function withTmp(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'aqua-checksums-run-'));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function withTmpAsync(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'aqua-checksums-run-'));
+  try {
+    return await fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function writeArtifact(dir, contents = {}) {
+  mkdirSync(join(dir, 'aqua-ci'), { recursive: true });
+  for (const { artifactPath } of CHECKSUM_FILES) writeFileSync(join(dir, artifactPath), contents[artifactPath] ?? VALID);
+}
+
+// fake の graphql: tree の問い合わせには headBlob の中身を持つ tree を返し、mutation は記録して URL を返す。
+function fakeGraphql(headBlob) {
+  const calls = [];
+  const graphql = async (query, variables) => {
+    calls.push({ query, variables });
+    if (query.includes('createCommitOnBranch')) return { createCommitOnBranch: { commit: { oid: OID, url: 'https://example.test/c' } } };
+    const entries = [{ name: 'aqua-checksums.json', mode: 33188, oid: gitBlobSha(headBlob) }];
+    return { repository: { github: tree(entries), aquaCi: tree(entries) } };
+  };
+  return { graphql, calls, mutations: () => calls.filter((c) => c.query.includes('createCommitOnBranch')) };
+}
+
+const commitArgs = (artifactDir, graphql) => ({ artifactDir, repo: 'o/r', branch: 'renovate/aqua', headSha: OID, graphql });
+
+test('commitChecksums: head と同じ中身なら mutation を呼ばない', async () => {
+  await withTmpAsync(async (dir) => {
+    writeArtifact(dir);
+    const fake = fakeGraphql(VALID);
+    assert.deepEqual(await commitChecksums(commitArgs(dir, fake.graphql)), { committed: false });
+    assert.equal(fake.mutations().length, 0);
+  });
+});
+
+test('commitChecksums: 変わったファイルだけを head の SHA を expectedHeadOid にして積む', async () => {
+  await withTmpAsync(async (dir) => {
+    const changed = Buffer.from('{"checksums":[]}\n');
+    writeArtifact(dir, { 'aqua-checksums.json': changed });
+    const fake = fakeGraphql(VALID);
+    assert.deepEqual(await commitChecksums(commitArgs(dir, fake.graphql)), {
+      committed: true, url: 'https://example.test/c', paths: ['.github/aqua-checksums.json'],
+    });
+    const [mutation] = fake.mutations();
+    assert.equal(mutation.variables.input.expectedHeadOid, OID);
+    assert.equal(mutation.variables.input.branch.branchName, 'renovate/aqua');
+    assert.deepEqual(mutation.variables.input.fileChanges.additions, [{ path: '.github/aqua-checksums.json', contents: changed.toString('base64') }]);
+    assert.equal(fake.calls[0].variables.github, `${OID}:.github`);
+  });
+});
+
+// 捕まえる変異: 入口から artifact の検査（checkArtifactEntries / parseChecksumsFile）の呼び出しが抜ける。
+test('commitChecksums: artifact が不正なら API を呼ばずに例外にする', async () => {
+  for (const [label, prepare] of [
+    ['余計なファイル', (dir) => writeFileSync(join(dir, 'evil.json'), '{}')],
+    ['形の違う JSON', (dir) => writeFileSync(join(dir, 'aqua-checksums.json'), '{"checksums":[],"x":1}')],
+  ]) {
+    await withTmpAsync(async (dir) => {
+      writeArtifact(dir);
+      prepare(dir);
+      const fake = fakeGraphql(Buffer.from('other'));
+      await assert.rejects(commitChecksums(commitArgs(dir, fake.graphql)), undefined, label);
+      assert.equal(fake.calls.length, 0, label);
+    });
+  }
+});
+
+test('regenerateChecksums: 両方の checksum を消してから、設定ごとに update-checksum --prune を実行する', () => {
+  withTmp((dir) => {
+    mkdirSync(join(dir, '.github', 'aqua-ci'), { recursive: true });
+    for (const { repoPath } of CHECKSUM_FILES) writeFileSync(join(dir, repoPath), 'stale');
+    const calls = [];
+    regenerateChecksums({
+      cwd: dir,
+      exec: (cmd, args, opts) => {
+        calls.push({ cmd, args, config: opts.env.AQUA_CONFIG, cwd: opts.cwd, existing: CHECKSUM_FILES.filter(({ repoPath }) => existsSync(join(dir, repoPath))).length });
+      },
+    });
+    assert.deepEqual(calls, [
+      { cmd: 'aqua', args: ['update-checksum', '--prune'], config: '.github/aqua.yaml', cwd: dir, existing: 0 },
+      { cmd: 'aqua', args: ['update-checksum', '--prune'], config: '.github/aqua-ci/aqua.yaml', cwd: dir, existing: 0 },
+    ]);
+  });
+});
+
+test('stageChecksums: 作り直した 2 つのファイルを artifact の配置で写す', () => {
+  withTmp((dir) => {
+    mkdirSync(join(dir, 'ws', '.github', 'aqua-ci'), { recursive: true });
+    writeFileSync(join(dir, 'ws', '.github', 'aqua-checksums.json'), 'a');
+    writeFileSync(join(dir, 'ws', '.github', 'aqua-ci', 'aqua-checksums.json'), 'b');
+    stageChecksums({ cwd: join(dir, 'ws'), outDir: join(dir, 'out') });
+    assert.equal(readFileSync(join(dir, 'out', 'aqua-checksums.json'), 'utf8'), 'a');
+    assert.equal(readFileSync(join(dir, 'out', 'aqua-ci', 'aqua-checksums.json'), 'utf8'), 'b');
+  });
+});
+
+// 捕まえる変異: symlink を辿って、その先の中身を artifact に載せる。
+test('stageChecksums: symlink なら例外にする', () => {
+  withTmp((dir) => {
+    mkdirSync(join(dir, 'ws', '.github', 'aqua-ci'), { recursive: true });
+    writeFileSync(join(dir, 'secret'), 's');
+    symlinkSync(join(dir, 'secret'), join(dir, 'ws', '.github', 'aqua-checksums.json'));
+    writeFileSync(join(dir, 'ws', '.github', 'aqua-ci', 'aqua-checksums.json'), 'b');
+    assert.throws(() => stageChecksums({ cwd: join(dir, 'ws'), outDir: join(dir, 'out') }), /通常のファイル/);
+  });
+});
+
+test('dirtyChecksums: コミット済みと違う・index に無いファイルを拾い、同じなら空を返す', () => {
+  withTmp((dir) => {
+    const git = (...args) => execFileSync('git', ['-C', dir, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    mkdirSync(join(dir, '.github', 'aqua-ci'), { recursive: true });
+    for (const { repoPath } of CHECKSUM_FILES) writeFileSync(join(dir, repoPath), 'v1');
+    git('add', '.');
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.test', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'init');
+    assert.equal(dirtyChecksums({ cwd: dir }), '');
+    writeFileSync(join(dir, '.github', 'aqua-checksums.json'), 'v2');
+    assert.match(dirtyChecksums({ cwd: dir }), /aqua-checksums\.json/);
+    git('checkout', '-q', '--', '.github/aqua-checksums.json');
+    // git diff --exit-code では拾えない形（index から消えて untracked として作り直された）。
+    git('rm', '-q', '--cached', '.github/aqua-ci/aqua-checksums.json');
+    assert.match(dirtyChecksums({ cwd: dir }), /\?\? \.github\/aqua-ci\/aqua-checksums\.json/);
+  });
 });

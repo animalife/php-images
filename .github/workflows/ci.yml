@@ -57,31 +57,23 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+
       - uses: aquaproj/aqua-installer@611554c6f0137ba41c8dd15aca8bee82504ea461 # v4.1.1
         with:
           aqua_version: v2.66.1
           # パッケージは使わない（update-checksum だけ）。
           enable_aqua_install: false
 
-      # update-checksum は既存のエントリの値を取り直さないので、ファイルを消してから全エントリを作り直して比べる
-      # （update-aqua-checksum.yml の Regenerate checksums と同じ手順）。消したファイルが作られない場合も
-      # 差分として拾うよう、git diff ではなく git status で見る。
+      # 作り直しと比較の手順は scripts/lib/aqua-checksums.mjs の regenerateChecksums / dirtyChecksums。
       - name: Verify aqua-checksums.json matches a full regeneration
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          files=(.github/aqua-checksums.json .github/aqua-ci/aqua-checksums.json)
-          rm -f "${files[@]}"
-          AQUA_CONFIG=.github/aqua.yaml aqua update-checksum --prune
-          AQUA_CONFIG=.github/aqua-ci/aqua.yaml aqua update-checksum --prune
-          changes="$(git status --porcelain -- "${files[@]}")"
-          if [ -n "${changes}" ]; then
-            git status --short -- "${files[@]}"
-            git diff -- "${files[@]}"
-            echo "::error::aqua-checksums.json が作り直した結果と一致しない。ファイルを消してから AQUA_CONFIG=<設定> aqua update-checksum --prune で作り直す"
-            exit 1
-          fi
+          CHECK: '1'
+        run: node scripts/regenerate-aqua-checksums.mjs
 
   test-scripts:
     name: test scripts
