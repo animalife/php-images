@@ -1,6 +1,6 @@
 // 作業ツリーの COMMIT_PATHS の変更を、createCommitOnBranch で TARGET_BRANCH に積む。
 // ruleset が署名を必須にするので、git push ではなく GitHub が署名する API でコミットする。
-// 作業ツリー（cwd）は信頼しないコードでもよいが、このスクリプトと lib は base の信頼版を実行する。
+// 作業ツリー（cwd）は信頼しない PR の head でよい。このスクリプトと lib は既定ブランチの信頼版を実行する。
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { buildAddArgs, parseNameStatusZ } from './lib/signed-commit.mjs';

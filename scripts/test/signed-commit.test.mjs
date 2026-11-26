@@ -53,8 +53,7 @@ test('ステージ対象のパスだけを -- の後ろに並べる', () => {
   ]);
 });
 
-// 捕まえる変異: パスが空のとき `git add -A` に倒れ、作業ツリーに展開した信頼版スクリプト（.base-trusted）まで
-// コミットに巻き込む。
+// 捕まえる変異: パスが空のとき `git add -A` に倒れ、名指ししていないファイルまでコミットに巻き込む。
 test('ステージ対象のパスが空なら例外にする', () => {
   assert.throws(() => buildAddArgs(''), /COMMIT_PATHS/);
   assert.throws(() => buildAddArgs('   '), /COMMIT_PATHS/);

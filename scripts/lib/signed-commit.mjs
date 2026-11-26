@@ -24,8 +24,8 @@ export function parseNameStatusZ(raw) {
   return { addPaths, delPaths };
 }
 
-// `git add -A` は選べないようにしている。作業ツリーには信頼版スクリプトを展開したディレクトリ（.base-trusted）が
-// あり、それをコミットに巻き込むため。
+// `git add -A` は選べないようにしている。作業ツリーは信頼しない PR の head なので、コミットするのは呼び出し側が
+// 名指ししたファイルだけにする。
 export function buildAddArgs(commitPaths) {
   const paths = (commitPaths ?? '').split(/\s+/).filter(Boolean);
   if (paths.length === 0) throw new Error('COMMIT_PATHS にコミットするパスが無い');
